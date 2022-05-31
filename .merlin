@@ -1,0 +1,5 @@
+PKG llvm
+PKG sexplib.std
+S src/
+B build/llvmSlac/src
+

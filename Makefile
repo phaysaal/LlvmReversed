@@ -1,9 +1,9 @@
 SRC_DIR:=src
 
-TOOLS:=llvmSlac
+TOOLS:=llvmrev
 
-TARGET:=native
-#TARGET:=byte
+#TARGET:=native
+TARGET:=byte
 
 LLVM_VERSION := 3.8
 CLANG := clang-$(LLVM_VERSION)
@@ -12,7 +12,7 @@ OCAMLBUILDFLAGS:=-classic-display -j 0 #-cflags -w,@a-4
 
 export OCAMLPATH=/usr/lib/ocaml/llvm-$(LLVM_VERSION)
 
-llvmSlac_OCAMLBUILDFLAGS:=-use-ocamlfind -pkgs llvm,llvm.bitreader,ppx_sexp_conv,ppx_deriving.show,sexplib -lflags -ccopt,-L/usr/lib/llvm-$(LLVM_VERSION)/lib
+llvmrev_OCAMLBUILDFLAGS:=-use-ocamlfind -pkgs llvm,llvm.bitreader,ppx_sexp_conv,ppx_deriving.show,sexplib -lflags -ccopt,-L/usr/lib/llvm-$(LLVM_VERSION)/lib
 
 
 
