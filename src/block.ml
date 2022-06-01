@@ -532,3 +532,140 @@ let rec is_empty = function
     SKIP -> true
   | BLOCK (p1, p2, _) -> is_empty p1 && is_empty p2
   | _ -> false
+
+
+let rec substitute u t p =
+  let subs_op = function
+      None -> None
+    | Some x -> Some (E.substitute u t x)
+  in
+  let subs_e = E.substitute u t in
+  let subs_t = T.substitute (_T u) (_T t) in
+  let subs_b = B.substitute (_T u) (_T t) in
+  let subs = substitute u t in
+  let rec subs_i = function
+      INIT_E -> INIT_E
+    | INIT_S t -> INIT_S (subs_t t)
+    | INIT_M sl -> INIT_M (List.map subs_i sl) 
+  in
+  match p with
+  | SKIP -> p
+  | FAIL -> p
+  | ASSIGN (a, b, y, l) ->
+     ASSIGN (subs_e a, subs_t b, subs y, l)
+  | ASSERT (a, y, l) ->
+     ASSERT (a, subs y, l)
+  | IF (a, b, c, y, l) ->
+     IF (subs_b a, subs b, subs c, subs y, l)
+  | WHILE (a, bs, b, c, y, l) ->
+     WHILE (subs_b a, bs, subs b, c, subs y, l)
+  | PROCCALL (z, a, b, i, y, l) ->
+     PROCCALL (subs_op z, a, List.map subs_t b, i, y, l)
+  | CONS (a, b, y, l) ->
+     CONS (subs_e a, b, subs y, l)
+  | MUTATION (a, b, c, y, l) ->
+     MUTATION (subs_t a, b, subs_t c, subs y, l)
+  | LOOKUP (a, b, c, y, l) ->
+     LOOKUP (subs_e a, subs_t b, c, subs y, l)
+  | DISPOSE (a, y, l) ->
+     DISPOSE (subs_t a, subs y, l)
+  | MALLOC (a, tl, y, l) ->
+     MALLOC (subs_e a, subs_e tl, subs y, l)
+  | SARRAY (a, b, tl, y, l) ->
+     SARRAY (a, b, tl, subs y, l)
+  | MAPS (a, b, y, l) ->
+     MAPS (a, b, y, l)
+  | PARALLEL (b, c, y, l) ->
+     PARALLEL (b, c, y, l)
+  | BLOCK (a, y, l) ->
+     BLOCK (subs a, subs y, l)
+  | DECL (a, len, init_data, y, l) ->
+     if a = u || a = t then
+       p
+     else
+       DECL (a, List.map subs_e len, subs_i init_data, subs y, l)
+  | RETURN (i, y, l) ->
+     RETURN (subs_t i, subs y, l)
+  | BREAK (y, l) ->
+     BREAK (subs y, l)
+  | CONTINUE (y, l) ->
+     CONTINUE (subs y, l)
+  | LABEL (lbl, el, y, l) ->
+     LABEL (lbl, el, subs y, l)
+
+       
+let rec restore_prog p =
+  match p with
+  | SKIP -> S.empty, p
+  | FAIL -> S.empty, p
+  | ASSIGN (a, T.EXP ((E.VAR _) as b), y, l) when E.is_ptr a && E.is_ptr b && E.is_param b ->
+     let r, y' = restore_prog y in
+     let y'' = substitute a b y' in
+     S.add a r, y''
+  | ASSIGN (a, b, y, l) ->
+     pprint 2 (ASSIGN (a, b, SKIP, l));
+     let r, y' = restore_prog y in
+     r, ASSIGN (a, b, y', l)
+  | ASSERT (a, y, l) ->
+     let r, y' = restore_prog y in
+     r,  ASSERT (a, y', l)
+  | IF (a, b, c, y, l) ->
+     let r1, b' = restore_prog b in
+     let r2, c' = restore_prog c in
+     let r3, y' = restore_prog y in
+     let r = S.union (S.union r1 r2) r3 in
+     r, IF (a, b', c', y', l)
+  | WHILE (a, bs, b, c, y, l) ->
+     let r1, b' = restore_prog b in
+     let r3, y' = restore_prog y in
+     let r = S.union r1 r3 in
+     r, WHILE (a, bs, b', c, y', l)
+  | PROCCALL (z, a, b, i, y, l) ->
+     let r, y' = restore_prog y in
+     r, PROCCALL (z, a, b, i, y', l)
+  | CONS (a, b, y, l) ->
+     let r, y' = restore_prog y in
+     r, CONS (a, b, y', l)
+  | MUTATION (a, b, c, y, l) ->
+     let r, y' = restore_prog y in
+     r, MUTATION (a, b, c, y', l)
+  | LOOKUP (a, b, c, y, l) ->
+     let r, y' = restore_prog y in
+     r, LOOKUP (a, b, c, y', l)
+  | DISPOSE (a, y, l) ->
+     let r, y' = restore_prog y in
+     r, DISPOSE (a, y', l)
+  | MALLOC (a, tl, y, l) ->
+     let r, y' = restore_prog y in
+     r, MALLOC (a, tl, y', l)
+  | SARRAY (a, b, tl, y, l) ->
+     let r, y' = restore_prog y in
+     r, SARRAY (a, b, tl, y', l)
+  | MAPS (a, b, y, l) ->
+     let r, y' = restore_prog y in
+     r, MAPS (a, b, y', l)
+  | PARALLEL (b, c, y, l) ->
+     let r, y' = restore_prog y in
+     r, PARALLEL (b, c, y', l)
+  | BLOCK (a, y, l) ->
+     let r1, a' = restore_prog a in
+     let r2, y' = restore_prog y in
+     S.union r1 r2, BLOCK (a', y', l)
+  | DECL (a, len, init_data, y, l) ->
+     let r, y' = restore_prog y in
+     if S.mem a r then
+       S.remove a r, y'
+     else
+       r, DECL (a, len, init_data, y', l)
+  | RETURN (i, y, l) ->
+     let r, y' = restore_prog y in
+     r, RETURN (i, y', l)
+  | BREAK (y, l) ->
+     let r, y' = restore_prog y in
+     r, BREAK (y', l)
+  | CONTINUE (y, l) ->
+     let r, y' = restore_prog y in
+     r, CONTINUE (y', l)
+  | LABEL (lbl, el, y, l) ->
+     let r, y' = restore_prog y in
+     r, LABEL (lbl, el, y', l)

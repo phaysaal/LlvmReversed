@@ -1896,7 +1896,8 @@ let parse_func vars f =
   
   let pkg : pkg = (blk_arr, vars'3, f) in
   let vars'3, b = parse_program pkg (0, n) in
-  let p = Procedure.mk_procedure name prms (B.block b) in
+  let _, b' = B.restore_prog b in
+  let p = Procedure.mk_procedure name prms (b') in
   vars'3, p
 ;;
 
