@@ -23,14 +23,15 @@ let checkdir s =
 
 let manage_dirs () =
   let endslash s = String.sub s (String.length s - 1) 1 = "/" in
-  let ifslash s = if endslash s then s else s ^ "/" in
+  let ifslash s = if endslash s then String.sub s 0 (String.length s - 1) ^ "_LlvmRev/" else s ^ "_LlvmRev/" in
   
   root_dir := Sys.argv.(1);
-  let slac_dir = ifslash !root_dir ^ "SlacData/" in
+  let lr_dir = ifslash !root_dir in
+  let slac_dir = lr_dir ^ "SlacData/" in
   
-  if Sys.file_exists slac_dir then
+  if Sys.file_exists lr_dir then
     begin
-      let _ = Sys.command ("rm -r " ^ slac_dir) in
+      let _ = Sys.command ("rm -r " ^ lr_dir) in
       ()
     end;
   comp_dir := slac_dir ^ "LLVM/";
@@ -39,6 +40,8 @@ let manage_dirs () =
   compacted_dir := !trans_dir ^ "Compacted/";
   transformed_dir := !trans_dir ^ "FPTransformed/";
 
+  F.pn slac_dir;
+  checkdir lr_dir;
   checkdir slac_dir;
   checkdir !comp_dir;
   checkdir !trans_dir;
