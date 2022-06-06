@@ -665,7 +665,7 @@ module Exp = struct
   let var_add t vv =
     match vv with
       VAR (s, attrs) ->
-      if t |<- attrs then VAR (s, attrs) else VAR (s, t::attrs)
+      if t |<- attrs then vv else VAR (s, t::attrs)
     | _ -> vv
 
   let vars_add tt vv =

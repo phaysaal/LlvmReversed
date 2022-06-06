@@ -1,3 +1,5 @@
+#include<assert.h>
+
 int f(int n, int m){
 	int i = 0;
 	while(i < n){
@@ -30,4 +32,15 @@ int h(int n, int m){
 		i++;
 	}
 	return i;
+}
+
+int main(){
+	int x = 3;
+	int y = 7;
+	int z = f(x, y); // 4
+	int w = g(x, y); // 2
+	int u = h(x, y); // 0
+
+	assert(z==w+u+1);
+	return 0;
 }

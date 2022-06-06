@@ -34,6 +34,7 @@ type t =
   | FAIL
 ;;
 
+let noop = ref true
 
 let extra sl =
   match (String.length sl) with
@@ -61,7 +62,6 @@ let rec pprint t = function
   | SKIP -> p ""
   | ASSERT (b, y, l) -> begin
        printl l;
-       
        pt "assert(" t;
        (iterS BExp.pprint " && ") ((fun (_,b,_,_) -> b) (List.hd b));
        pn ");"; pprint t y
@@ -472,8 +472,9 @@ let size x =
 
 let malloc x size =
   let p = MALLOC (x, size, SKIP, dl) in
+  let ps = decl_all ([x]) in
+  join_at_last p ps
   (* pprint 0 p; *)
-  p
 ;;
 let mutation x f e =
   let p = MUTATION (x, f, e, SKIP, dl) in
@@ -593,51 +594,78 @@ let rec substitute u t p =
   | LABEL (lbl, el, y, l) ->
      LABEL (lbl, el, subs y, l)
 
-       
+let addfvs s fvs =
+  S.union s (S.of_list fvs)
+;;
+
+let addfv (r,s) fvs =
+  (r, addfvs s fvs)
+;;
+
 let rec restore_prog p =
   match p with
-  | SKIP -> S.empty, p
-  | FAIL -> S.empty, p
+  | SKIP -> (S.empty, S.empty), p
+  | FAIL -> (S.empty, S.empty), p
   | ASSIGN (a, T.EXP ((E.VAR _) as b), y, l) when E.is_ptr a && E.is_ptr b && E.is_param b ->
-     let r, y' = restore_prog y in
+     let (r,s), y' = restore_prog y in
      let y'' = substitute a b y' in
-     S.add a r, y''
+     if !noop || E.is_global a || E.is_param a || S.mem a s then
+       (S.add a r, addfvs s (E.fv b)), y''
+     else
+       (r,s), y''
   | ASSIGN (a, b, y, l) ->
-     pprint 2 (ASSIGN (a, b, SKIP, l));
-     let r, y' = restore_prog y in
-     r, ASSIGN (a, b, y', l)
+     let (r, s), y' = restore_prog y in
+     if !noop || E.is_global a || E.is_param a || S.mem a s then
+       (r, addfvs s (T.fv b)), ASSIGN (a, b, y', l)
+     else
+       (r, s), y'
   | ASSERT (a, y, l) ->
      let r, y' = restore_prog y in
-     r,  ASSERT (a, y', l)
+     addfv r (F.fv (List.hd a)),  ASSERT (a, y', l)
   | IF (a, b, c, y, l) ->
-     let r1, b' = restore_prog b in
-     let r2, c' = restore_prog c in
-     let r3, y' = restore_prog y in
+     let (r1, s1), b' = restore_prog b in
+     let (r2, s2), c' = restore_prog c in
+     let (r3, s3), y' = restore_prog y in
      let r = S.union (S.union r1 r2) r3 in
-     r, IF (a, b', c', y', l)
+     let s = S.union (S.union s1 s2) s3 in
+     (r, addfvs s (B.fv a)), IF (a, b', c', y', l)
   | WHILE (a, bs, b, c, y, l) ->
-     let r1, b' = restore_prog b in
-     let r3, y' = restore_prog y in
+     let (r1, s1), b' = restore_prog b in
+     let (r3, s3), y' = restore_prog y in
      let r = S.union r1 r3 in
-     r, WHILE (a, bs, b', c, y', l)
+     let s = S.union s1 s3 in
+     (r, addfvs s (B.fv a)), WHILE (a, bs, b', c, y', l)
   | PROCCALL (z, a, b, i, y, l) ->
-     let r, y' = restore_prog y in
-     r, PROCCALL (z, a, b, i, y', l)
+     let (r,s), y' = restore_prog y in
+     begin
+       match z with
+         None ->
+         (r, addfvs s (List.concat (List.map T.fv b))), PROCCALL (z, a, b, i, y', l)
+       | Some z' ->
+          if !noop || E.is_global z' || E.is_param z' || S.mem z' s then
+            (r, addfvs s (z'::List.concat (List.map T.fv b))), PROCCALL (z, a, b, i, y', l)
+          else
+            (r, addfvs s (List.concat (List.map T.fv b))), PROCCALL (None, a, b, i, y', l)
+     end
   | CONS (a, b, y, l) ->
      let r, y' = restore_prog y in
      r, CONS (a, b, y', l)
   | MUTATION (a, b, c, y, l) ->
      let r, y' = restore_prog y in
-     r, MUTATION (a, b, c, y', l)
+     addfv r (T.fv a @ T.fv c), MUTATION (a, b, c, y', l)
   | LOOKUP (a, b, c, y, l) ->
-     let r, y' = restore_prog y in
-     r, LOOKUP (a, b, c, y', l)
+     let (r, s), y' = restore_prog y in
+     if !noop || E.is_global a || E.is_param a || S.mem a s then
+       (r, addfvs s (T.fv b)), LOOKUP (a, b, c, y', l)
+     else
+       (r, s), y'
+  (*  r, LOOKUP (a, b, c, y', l) *)
   | DISPOSE (a, y, l) ->
      let r, y' = restore_prog y in
-     r, DISPOSE (a, y', l)
+     addfv r (T.fv a), DISPOSE (a, y', l)
   | MALLOC (a, tl, y, l) ->
      let r, y' = restore_prog y in
-     r, MALLOC (a, tl, y', l)
+     addfv r (a::E.fv tl), MALLOC (a, tl, y', l)
   | SARRAY (a, b, tl, y, l) ->
      let r, y' = restore_prog y in
      r, SARRAY (a, b, tl, y', l)
@@ -648,18 +676,52 @@ let rec restore_prog p =
      let r, y' = restore_prog y in
      r, PARALLEL (b, c, y', l)
   | BLOCK (a, y, l) ->
-     let r1, a' = restore_prog a in
-     let r2, y' = restore_prog y in
-     S.union r1 r2, BLOCK (a', y', l)
+     let (r1,s1), a' = restore_prog a in
+     let (r2,s2), y' = restore_prog y in
+     (S.union r1 r2, S.union s1 s2), BLOCK (a', y', l)
   | DECL (a, len, init_data, y, l) ->
-     let r, y' = restore_prog y in
-     if S.mem a r then
-       S.remove a r, y'
-     else
-       r, DECL (a, len, init_data, y', l)
+     begin
+       let deal_decl () =
+         let (r,s), y' = restore_prog y in
+         let fvlen = List.map E.fv len |> List.concat in
+         let fvinit = fv_of_init init_data in
+         let s' = addfvs (S.union fvinit s) fvlen in
+         if S.mem a r then
+           (S.remove a r, s), y'
+         else
+           if !noop || E.is_global a || E.is_param a || S.mem a s then
+             (r, s'), DECL (a, len, init_data, y', l)
+           else
+             (r, s), y'
+       in
+       
+       if not !noop && init_data = INIT_E then
+         let is_not_in y = let _, fvs = mod_free_var y in
+         not (S.mem a fvs) in
+         match y with
+           MALLOC (c1, tl,
+                   ASSIGN (p, c2, y, _), _) when a=c1 && c1=T.toExp c2 && is_not_in y ->
+            restore_prog (MALLOC (p, tl, y, l))
+         | IF (b,
+               ASSIGN (c1, T.EXP(E.CONST 1), SKIP, _),
+               ASSIGN (c2, T.EXP(E.CONST 0), SKIP, _),
+               DECL (cv'', _, INIT_E,
+                     ASSIGN (cv', cp,
+                             ASSERT ([(_,[B.UNIT (cv, Op.NE, T.EXP (E.CONST 0))],[],[])],
+                                     y,_),_), _),
+               _) when T.toExp cv=cv' && T.toExp cp=a && a=c1 && a=c2 && is_not_in y ->
+            restore_prog (ASSERT ([([],[b],[],[])],y,l))
+         | LOOKUP (a1, pt, fld,
+                   ASSIGN (c, a2, y, _), _) when a=a1 && a=T.toExp a2 && is_not_in y ->
+            restore_prog (LOOKUP (c, pt, fld, y, l))
+         | _ ->
+            deal_decl ()
+       else
+         deal_decl ()
+     end
   | RETURN (i, y, l) ->
      let r, y' = restore_prog y in
-     r, RETURN (i, y', l)
+     addfv r (T.fv i), RETURN (i, y', l)
   | BREAK (y, l) ->
      let r, y' = restore_prog y in
      r, BREAK (y', l)

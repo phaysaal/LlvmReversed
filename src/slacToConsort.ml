@@ -61,7 +61,7 @@ let is_a_ptr ptrs vs = function
     E.VAR (s,attr) ->
      let b1 = S_E.exists (function E.VAR (sv,_) -> s=sv | _ -> false) ptrs in
      let b2 = List.mem E.PTR attr in
-     let b3 = S_E.exists (function E.VAR (sv,attr') -> sv=s | _ -> false) vs in
+     let b3 = S_E.exists (function E.VAR (sv,attr') as v -> sv=s && E.is_ptr v  | _ -> false) vs in
      b1 || b2 || b3
   | _ -> false
 ;;
@@ -162,7 +162,12 @@ let rec exp_to_lhs ?(arg_mode=false) ptrs vs e : C.lhs =
   | INDICES (_) ->
      raise (NotSupported "Indices")
   | ADDR (a) ->
-     exp_to_lhs ptrs vs a
+     begin
+       let n = exp_to_lhs ptrs vs a in
+       match n with
+         C.(`ODeref n') -> C.(`OVar n')
+       | _ -> raise (NotSupported "Not Good Addr")
+     end
   | REF (r) ->
      C.(`Mkref (exp_to_lhs ptrs vs r))     
   | NEG (n) ->
@@ -210,16 +215,20 @@ let rec bexp_to_lhs ptrs vs = function
   | _ -> raise (NotSupported "bexp_to_lhs")
 ;;
 
-let term_to_imm_op = function
+let term_to_imm_op vs = function
     T.NULL -> C.IInt 0
   | T.EXP (E.CONST i) -> C.IInt i
-  | T.EXP (E.VAR (s,_)) -> C.IVar s
+  | T.EXP ((E.VAR (s,_) as e)) ->
+     if S_E.mem e vs then
+       C.IVar ("*" ^ s)
+     else
+       C.IVar s
   | _ -> raise (NotSupported "term_to_imm_op")
 ;;
                            
-let bexp_to_relation = function
+let bexp_to_relation vs = function
     B.UNIT (t1, op, t2) ->
-    C.{rop1= term_to_imm_op t1;cond=string_of_op op; rop2= term_to_imm_op t2}
+    C.{rop1= term_to_imm_op vs t1;cond=string_of_op op; rop2= term_to_imm_op vs t2}
   | _ -> raise (NotSupported "term_to_imm_op")
 ;;
 
@@ -234,6 +243,8 @@ let rec to_lhs (b : [ `Var of string | `BinOp of C.lhs * string * C.lhs | `Nonde
   | `BinOp (b1, op, b2) -> `BinOp (b1, op, b2)
   | `Nondet -> raise (NotSupported "Nondeterministism")
 ;;
+
+
 
 let rec bexp_to_ifcond ptrs vs b : [ `Var of string | `BinOp of C.lhs * string * C.lhs | `Nondet] =
   match b with
@@ -250,6 +261,22 @@ let rec bexp_to_ifcond ptrs vs b : [ `Var of string | `BinOp of C.lhs * string *
      C.(`BinOp (term_to_lhs ptrs vs a, "<=", term_to_lhs ptrs vs b))
   | _ ->
      B.pprint b; F.pn "";
+     raise (NotSupported "bexp_to_ifcond")
+;;
+
+let rec mk_cond ptrs vs thenbody elsebody cond =
+  match cond with
+    B.UNIT _ ->
+    C.Cond (dp, bexp_to_ifcond ptrs vs cond, thenbody, elsebody)
+  | B.OP (b1, V.Op.AND, b2) ->
+     C.Cond (dp, bexp_to_ifcond ptrs vs b1, mk_cond ptrs vs thenbody elsebody b2, elsebody)
+  | B.OP (B.UNIT (a, V.Op.LE, b), V.Op.OR, B.UNIT (a', V.Op.EQ, b'))
+    | B.OP (B.UNIT (a, V.Op.EQ, b), V.Op.OR, B.UNIT (a', V.Op.LE, b')) when a=a' && b=b' ->
+     C.Cond (dp, bexp_to_ifcond ptrs vs cond, thenbody, elsebody)
+  | B.OP (b1, V.Op.OR, b2) ->
+     C.Cond (dp, bexp_to_ifcond ptrs vs b1, thenbody, mk_cond ptrs vs thenbody elsebody b2)
+  | _ ->
+     B.pprint cond; F.pn "";
      raise (NotSupported "bexp_to_ifcond")
 ;;
 
@@ -418,11 +445,18 @@ let rec declare_and_initialize declared' ptrs vs y a len init_data =
                          y
                     )
              | [], S.INIT_S t ->
-                C.Let (dp,
-                       Ast.PVar (string_of_evar a),
-                       term_to_lhs ptrs vs t,
-                       y
-                  )  
+                if is_a_ptr ptrs vs a then
+                  C.Let (dp,
+                         Ast.PVar (string_of_evar a),
+                         C.(`Mkref (term_to_lhs ptrs vs t)),
+                         y
+                    )  
+                else
+                  C.Let (dp,
+                         Ast.PVar (string_of_evar a),
+                         term_to_lhs ptrs vs t,
+                         y
+                    )  
              | E.CONST n::_, S.INIT_E when n=0 || n=1 -> 
                 C.Let (dp,
                        Ast.PVar (string_of_evar a),
@@ -490,7 +524,6 @@ let to_simple ptrs vs l =
     T.EXP ((E.VAR _) as l') ->
      if is_a_ptr ptrs vs l' then
        begin
-         E.pprint l'; F.pn "";
          let f = fresh_var () in
          T.EXP (E.VAR (f,[])), [(f, C.(`ODeref (string_of_tvar l)))]
        end
@@ -509,7 +542,7 @@ let mk_assert ptrs vs y b =
      let l', pr1 = to_simple ptrs vs l in
      let r', pr2 = to_simple ptrs vs r in
      let pr : (string * C.lhs) list = pr1@pr2 in
-     let cnd = C.{rop1= term_to_imm_op l';cond=string_of_op op; rop2= term_to_imm_op r'} in
+     let cnd = C.{rop1= term_to_imm_op vs l';cond=string_of_op op; rop2= term_to_imm_op vs r'} in
      let prog =  C.Seq (ldp,
              C.Assert (dp, cnd),
              y) in
@@ -521,15 +554,30 @@ let mk_assert ptrs vs y b =
      raise (NotSupported " and never will")
 ;;
 
+let print_vars b vs =
+  F.pn "-------";
+  S.pprint 2 b; 
+  S_E.iter (fun v -> E.print v; F.pn "") vs;
+  F.pn "";;
+
+let enptr a vs =
+  let a' = E.var_add E.PTR a in
+  S_E.add a' (S_E.remove a vs)
+;;
+
 let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
   
   match prog with
   | S.SKIP -> (S_E.empty, S_E.empty, [], C.Unit (dp))
-  | ASSIGN (a, b, y, _) ->
-     let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, S_E.add a vs) y in
+  | ASSIGN (a, b, y, l) ->
+     
+     let vs' = enptr a vs in
+     (* print_vars (ASSIGN (a,b,S.SKIP,l)) vs'; *)
+     let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs') y in
+     
      let sa = try string_of_evar a with e -> F.dbgf "SC" "Exception in Assing"; raise e in
      let lb = term_to_lhs ptrs vs b in
-     let ptrs' = S_E.add a S_E.empty in
+     let ptrs' = enptr a ptrs in
      let p = C.Seq (ldp, C.Assign (dp, sa, lb), y') in
      (ptrs',
       declared,
@@ -538,8 +586,10 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      )
   | ASSERT (a, y, l) ->
      let ptrs, declared, ry, y' = body_to_cexp gvars y in
+     
      let formula = ((fun (_, b, _, _) -> B.list_to_bexp b) (List.hd a)) in
      let b = mk_assert ptrs vs y' formula in
+     
      (ptrs,
       declared,
       ry,
@@ -555,8 +605,9 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      let modv_c, _ = S.mod_free_var c in
      let _, freev_y = S.mod_free_var y in
      let comv = S.S.inter (S.S.union modv_b modv_c) freev_y in
-     let comv' = S_E.map (function E.VAR (v, attr) -> E.VAR (v, E.PTR::attr) | e -> e) comv in
-     let gvars' = (dep_map, gvs, S_E.union vs comv') in
+     let comv' = S_E.map (E.var_add E.PTR) comv in
+     let vs' = S_E.map (fun v -> if S_E.mem v comv then E.var_add E.PTR v else v) vs in
+     let gvars' = (dep_map, gvs, vs') in
      let ptrs3, declared1, ry, y' = body_to_cexp gvars' y in
      let gvars'' = (dep_map, gvs, S_E.union (S_E.union vs comv') ptrs3) in
      let ptrs1, declared2, rb, b' = body_to_cexp gvars'' b in
@@ -565,7 +616,8 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      let ptrs = S_E.union (S_E.union (S_E.union ptrs1 ptrs2) ptrs3) comv' in
      let declared = S_E.union (S_E.union declared1 declared2) declared3 in
      let p = C.Seq (ldp,
-                    C.Cond (dp, bexp_to_ifcond ptrs vs a, b', c'),
+                    mk_cond ptrs vs b' c' a,
+                      (* C.Cond (dp, bexp_to_ifcond ptrs vs a, b', c'), *)
                     y'
                ) in
      (ptrs,
@@ -575,15 +627,8 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
   | WHILE (a, bs, b, c, y, l) ->
      let ptrs, declared, rw, w' = while_to_recf gvars a b y in
      (ptrs, declared, rw, w')
-  | PROCCALL (_, T.EXP (E.VAR ("__VERIFIER_nondet_int",_)), [], _,
-              DECL(a, _, INIT_E,
-                   DECL(_,_,_,
-                        ASSIGN(a',r',y,l),_), _), _)
-    | PROCCALL (_, T.EXP (E.VAR ("__VERIFIER_nondet_int",_)), [], _,
-              DECL(a, _, INIT_E,
-                        ASSIGN(a',r',y,l),_), _)
-     when a=a' ->
-     
+  | DECL (a', _, S.INIT_E, PROCCALL (Some a, T.EXP (E.VAR ("__VERIFIER_nondet_int",_)), [], _,
+              y,_), _) when a'=a ->
      let ptrs, declared, ry, y' = body_to_cexp gvars y in
      let y', declared = fix_shadowing declared a y' in
      let sa = string_of_evar a in
@@ -609,19 +654,26 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      let a = B.UNIT (cond, V.Op.NE, T.zero) in
      (ptrs, declared, ry,
       C.Seq (ldp,
-             C.Assert (dp, bexp_to_relation a),
+             C.Assert (dp, bexp_to_relation vs a),
              y'))
   | PROCCALL (_, T.EXP (E.VAR ("abort",_)), [], _,
               y, _) ->
-     S_E.empty, S_E.empty, [], C.Assert (dp, bexp_to_relation (B.UNIT(T.zero, V.Op.NE, T.zero)))
+     S_E.empty, S_E.empty, [], C.Assert (dp, bexp_to_relation vs (B.UNIT(T.zero, V.Op.NE, T.zero)))
   | PROCCALL (z, a, b, i, y, l) ->
      let addrs' = (List.map T.toExp b)
                   |> S_E.of_list
                   |> S_E.filter (function E.ADDR _ -> true | _ -> false) 
                   |> S_E.map (function E.ADDR x -> x | x -> x) in
-     let addrs = S_E.map (function E.VAR (s,attr) -> E.VAR (s, E.PTR::attr) | v -> v) addrs' in
-     let vs = S_E.filter (fun v -> not (S_E.mem v addrs')) vs in
-     let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, S_E.union vs addrs) y in
+     let addrs = S_E.map (E.var_add E.PTR) addrs' in
+     let vs' = S_E.filter (fun v -> not (S_E.mem v addrs')) vs in
+     let vs'' = match z with
+         None -> vs'
+       | Some x ->
+          enptr x vs'
+     in
+     let vs'3 = S_E.union vs'' addrs in
+     (* print_vars (PROCCALL (z, a, b, i, S.SKIP, l)) vs; *)
+     let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs'3) y in
      let gvs = try DM.find (string_of_tvar a) dep_map with _ -> S_E.empty in
      let lgvs = to_list gvs in
      let lhs_gvs = List.map (exp_to_lhs ~arg_mode:true ptrs vs) lgvs in
@@ -630,10 +682,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      
      let par_arg = List.combine b vparams in
      let args' = List.map (fun (a, p) ->
-                     if not (E.is_ptr p) then
-                       term_to_lhs ptrs vs a
-                     else
-                       term_to_lhs ~arg_mode:true ptrs vs a
+                     term_to_lhs ~arg_mode:(E.is_ptr p) ptrs vs a
                    ) par_arg in 
      let all_args = args' @ lhs_gvs in
      let ptrs', p, declared =
@@ -700,7 +749,8 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      else
        raise (Supported "Mutation")
   | LOOKUP (a, b, c, y, l) ->
-     let ptrs, declared, ry, y' = body_to_cexp gvars y in
+     let vs' = enptr a vs in
+     let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs') y in
      let (pt, ind) = de_add b in
      let y', declared = fix_shadowing declared a y' in
      let rhs =
@@ -716,7 +766,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
        (S_E.add a ptrs,
         declared,
         ry,
-        C.Seq (ldp, C.Assign (dp, string_of_evar a,rhs), y')
+        C.Seq (ldp, C.Assign (dp, string_of_evar a, rhs), y')
        )
      else
        raise (Supported "Lookup")
@@ -775,7 +825,8 @@ and while_to_recf (dep_map, gvs, vs) cond body rest =
 
   let then_body = join_at_end exp' then_body' in
   let ptrs = S_E.union ptrs0 modv'' in
-  let f_body = C.Cond (dp, bexp_to_ifcond ptrs vs cond, then_body, C.Unit (dp)) in
+  let f_body = mk_cond ptrs vs then_body (C.Unit (dp)) cond in
+  (* C.Cond (dp, bexp_to_ifcond ptrs vs cond, then_body, C.Unit (dp)) in *)
   let new_f = (new_fn, params, f_body) in
   
   let ptrs1, declared, fns1, body' = body_to_cexp gvars' rest in
@@ -793,47 +844,65 @@ let string_of_globals = function
 
 let func_to_fn dep_map (nm, params, body) =
   let snm = string_of_evar nm in
-  let gvars = DM.find snm dep_map in
+  let gvars' = DM.find snm dep_map in
+  let gvars = S_E.map (E.var_add E.PTR) gvars' in
   let vparams = List.map var_of_assignee params in
-  let ptrs, _, fns, exp = body_to_cexp (dep_map, gvars, (S_E.of_list vparams)) body in
+  let ptrs, _, fns, exp = body_to_cexp (dep_map, gvars, S_E.union gvars (S_E.of_list vparams)) body in
   let sparams = List.map string_of_evar vparams in
   let l_glo_dep = to_list gvars |> List.map string_of_evar in
   fns @ [(snm, sparams@l_glo_dep, exp)]
 ;;
 
-let stmt_to_fn b = function
+let stmt_to_fn ptrs b = function
   | S.ASSIGN (v, t, _, _) ->
      let sv = string_of_evar v in
      let lhs = term_to_lhs S_E.empty S_E.empty  t in
      C.Let (dp, Ast.PVar sv, lhs, b)
   | S.DECL (v, len, init_data, _, _) ->
-     let exp (*,_*) = declare_and_initialize S_E.empty S_E.empty S_E.empty b v len init_data in
+     let exp (*,_*) = declare_and_initialize S_E.empty ptrs S_E.empty b v len init_data in
      exp
   | _ -> raise (NotSupported "Stmt")
     
-let rec simpleC_to_prog dep_map acc = function
+let rec slacC_to_prog dep_map acc = function
     [] -> acc
   | G.PROC (proc,_,_,_,_)::xs ->
      
      let prog = func_to_fn dep_map proc in
      
-     simpleC_to_prog dep_map (acc @ prog) xs
+     slacC_to_prog dep_map (acc @ prog) xs
   | G.FFILE (st,_)::xs ->
      let fin = open_in st in
      let pd : G.t = Marshal.from_channel fin in
      close_in fin;
-     simpleC_to_prog dep_map acc (pd::xs)
-  | _::xs -> simpleC_to_prog dep_map acc xs
+     slacC_to_prog dep_map acc (pd::xs)
+  | _::xs -> slacC_to_prog dep_map acc xs
 ;;
+
+let is_not_removable nm =
+  match nm with
+    "assert"
+  | "abort"
+    | "malloc"
+    | "__VERIFIER_nondet_int"
+    | "__VERIFIER_assert"
+    | "__assert_fail"
+    | "reach_error"
+    | "llvm.stacksave"
+    | "llvm.stackrestore"
+    -> false
+  | _ -> true
+;;
+
 
 let rec get_func_global_dep_fn progs dep_map fn body =
   let sfn = string_of_evar fn in
   if DM.mem sfn dep_map then
     dep_map, DM.find sfn dep_map
   else
-    let procs : S_S.t = S.get_func_call body in
+    let procs : S_S.t = S.get_func_call body |> S_S.filter (fun f -> is_not_removable f) in
     let _, fv = S.mod_free_var body in
     let gfv : S_E.t = S_E.filter E.is_global fv in
+    
     let all_gfv, dep_map' =
       S_S.fold (fun proc ((fvs:S_E.t), _dep_map) ->
           try
@@ -844,6 +913,7 @@ let rec get_func_global_dep_fn progs dep_map fn body =
             Not_found ->
             S_E.empty, _dep_map
         ) procs (gfv, dep_map) in
+    
     let dep_map'' = DM.add sfn all_gfv dep_map' in
     dep_map'', all_gfv
 ;;
@@ -858,19 +928,6 @@ let rec get_func_global_dep progs dep_map = function
        get_func_global_dep progs dep_map' xs
 ;;
 
-let is_not_removable nm =
-  match nm with
-    "assert"
-  | "abort"
-    | "__VERIFIER_nondet_int"
-    | "__VERIFIER_assert"
-    | "__assert_fail"
-    | "reach_error"
-    | "llvm.stacksave"
-    | "llvm.stackrestore"
-    -> false
-  | _ -> true
-;;
 
 let slac_to_consort progs =
   let funs = List.filter
@@ -896,29 +953,46 @@ let slac_to_consort progs =
       ) [] funs in
   procedures := procs;
   let dep_map = get_func_global_dep procs DM.empty procs in
-  let fns = simpleC_to_prog dep_map [] funs in
+  
+  let fns = slacC_to_prog dep_map [] funs in
   let is_main_exists = List.exists (function ("main",_,_) -> true | _ -> false) fns in
-  let main =
+  let main, gvs =
     if is_main_exists then
       begin
         let gvs = try DM.find "main" dep_map with _ -> S_E.empty in
         let s_gvs = List.map (exp_to_lhs ~arg_mode:true S_E.empty S_E.empty) (to_list gvs) in
-        C.Value (dp, C.(`Call ("main",0,s_gvs)))
+        C.Value (dp, C.(`Call ("main",0,s_gvs))), gvs
       end
     else
-      C.Unit dp
+      C.Unit dp, S_E.empty
   in
   let body = List.fold_left (fun b g ->
                  match g with
-                   G.STATEMENT s -> stmt_to_fn b s
+                   G.STATEMENT s -> stmt_to_fn gvs b s
                  | _ -> b
                ) main globals in
   (fns, body)
 
-let print_consort progs =
-  
+let print_consort consort fname progs =
   let (fns, body) = slac_to_consort progs in
-  Ftools.pn "**************************************";
-  ConsortAstPrinter.pretty_print_program stdout (fns, body);
-  Ftools.pn "**************************************";
+  Ftools.pn "Translation to ConSORT is finished";
+
+  if consort = "" then
+    begin
+      ConsortAstPrinter.pretty_print_program stdout (fns, body)
+    end
+  else
+    begin
+      let fname' = fname ^ ".consort" in
+      let ic = open_out fname' in
+      ConsortAstPrinter.pretty_print_program ic (fns, body);
+      F.pn ("ConSORT output is written to " ^ fname');
+      F.pn ("... will be verified by " ^ consort);
+      let s = Sys.command (consort ^ " " ^ fname') in
+      if s = 0 then
+        F.pn ("Verification finished.")
+      else
+        F.pn ("Verification failed.")
+    end;
+  
   ()

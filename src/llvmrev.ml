@@ -1,14 +1,17 @@
 module V = Base
 module F = Ftools
 module T = Trans
-         
+module CONF = Map.Make(String)
+            
 exception Err of string
 type filename = string
 type fullpath = string
 type funcname = string
 module VV  = Map.Make(String)
 type t = filename * fullpath * Global.t list * Structure.t VV.t * bool * V.Formula.t * (string VV.t)
-        
+
+let conf = ref CONF.empty
+       
 let root_dir = ref "";;
 let comp_dir = ref "";;
 let compacted_dir = ref "";;
@@ -117,20 +120,51 @@ let save_file i fname (f : Global.t list) =
 ;;
 
 let translate llvm_files =
-  List.iteri (fun i f ->
+  List.mapi (fun i f ->
       let f' = T.translate (!comp_dir ^ f) in
       F.pn_s "DEB" (f ^ " is finished translating");
-      save_file i f f'
+      save_file i f f';
+      (f, f')
     ) llvm_files
+;;
+
+
+let rec read_config ic =
+  begin
+    let line = input_line ic in
+    match String.split_on_char '=' line with
+      k::v::_ ->
+       conf := CONF.add k v !conf;
+    | _ -> ()
+  end;
+  read_config ic
+;;
+
+let configure () =
+  let s = Sys.command ("ls .conf") in
+  if s = 0 then
+    begin
+      let ic = open_in ".conf" in
+      try
+        read_config ic
+      with
+        _ -> close_in ic
+    end
 ;;
 
 let _ =
   try
     manage_dirs ();
+    configure ();
     let llvm_files = compile () in
     T.pf "Compilation to LLVM is finished\n";
-    translate llvm_files;
-    T.pf "Translation to SLAC C is finished\n"
+    let gs = translate llvm_files in
+    T.pf "Translation to SLAC C is finished\n";
+
+    let consort = try CONF.find "CONSORT" !conf with Not_found -> "" in
+    let consortoutdir = try CONF.find "CONSORTOUTDIR" !conf with Not_found -> "" in
+    List.iter (fun (f, g) ->
+                SlacToConsort.print_consort consort (consortoutdir ^ f) g) gs
   with
     e ->
     T.pf "Exception\n"; raise e

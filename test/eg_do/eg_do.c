@@ -1,3 +1,5 @@
+#include<stdio.h>
+#include<assert.h>
 
 int f(){
 	int i=0;
@@ -137,7 +139,7 @@ int gh(){
 }
 
 // Not covered yet
-int gh(){
+int gh1(){
 	int i=0;
 	int n=10;
 	do{
@@ -157,3 +159,26 @@ int gh(){
 	return i;
 }
 
+int main(){
+	int a1, a2, a3, a4, a5, a6, a7, a8, a9;
+	a1 = f();
+	a2 = g();
+	a3 = g1();
+	a4 = g2();
+	a5 = h();
+	a6 = h1();
+	a7 = h2();
+	a8 = gh();
+	a9 = gh1();
+
+	assert(a1==10);
+	assert(a2==8);
+	assert(a3==11);
+	assert(a4==1);
+	assert(a5==11);
+	assert(a6==11);
+	assert(a7==83);
+	//assert(a8==173);
+	//assert(a9==7);
+	return 0;
+}

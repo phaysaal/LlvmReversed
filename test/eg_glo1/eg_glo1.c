@@ -1,3 +1,6 @@
+#include<assert.h>
+#include<stdlib.h>
+
 int x = 1;
 int y = 2;
 int z = 3;
@@ -11,11 +14,11 @@ int f1(int x){
 }
 
 int f2(int w){
-	return f1(w); // BUG
+	return f1(w);
 }
 
 int f3(){
-	return f2(z); // BUG
+	return f2(z);
 }
 
 int f4(){
@@ -31,19 +34,15 @@ void f6(){
 	x = 0;
 }
 
-
-void* f7(){
-	int *x = malloc(sizeof(int));
-	return x;
-}
-
 int main(){
 	int a = 10;
 	int n = f3();
 	int m = f4();
-	int q = f5(m); //BUG
+	int q = f5(m);
 	f6();
-	int *p = f7();
+	assert(n == 5);
+	assert(m == 1);
+	assert(q == 2);
 }
 
 
