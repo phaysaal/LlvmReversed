@@ -3,5 +3,5 @@ int main(){
 	int y = 10;
 	while(x < y) x++;
 	assert (x==y);
-	return 0;
+	return x;
 }

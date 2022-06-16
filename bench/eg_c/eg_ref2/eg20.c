@@ -17,5 +17,5 @@ int main(){
   y = f(z);
   y = f2(&z);
   assert (z==4 && y==5);
-  return 0;
+  return z;
 }

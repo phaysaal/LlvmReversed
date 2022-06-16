@@ -14,5 +14,5 @@ int main(){
 	int c;
 	c = ifonly(a, b);
 	assert(c==a+b+1);
-	return 0;
+	return c;
 }

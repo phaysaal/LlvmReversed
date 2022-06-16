@@ -624,91 +624,95 @@ let addfv (r,s) fvs =
 ;;
 
 let restore_prog structures p =
-  let rec restore_prog p =
+  let rec restore_prog locals p =
     match p with
     | SKIP -> (S.empty, S.empty), p
     | FAIL -> (S.empty, S.empty), p
     | ASSIGN (a, T.EXP ((E.VAR _) as b), y, l) when E.is_ptr a && E.is_ptr b && E.is_param b ->
        (* pprint 2 (ASSIGN (a, T.EXP b, SKIP, l)); *)
        let y' = substitute a b y in
-       let (r,s), y'' = restore_prog y' in
-       if !noop || E.is_global a || E.is_param a || S.mem a s then
+       let (r,s), y'' = restore_prog locals y' in
+       if !noop || (* E.is_global a || E.is_param a ||*) not (List.mem a locals) || S.mem a s then
          (S.add a r, addfvs s (E.fv b)), y''
        else
          (r,s), y''
     | ASSIGN (a, b, y, l) ->
-       let (r, s), y' = restore_prog y in
-       if !noop || E.is_global a || E.is_param a || S.mem a s then
+       let (r, s), y' = restore_prog locals y in
+       if !noop || (* E.is_global a || E.is_param a ||*) not (List.mem a locals) || S.mem a s then
          (r, addfvs s (T.fv b)), ASSIGN (a, b, y', l)
        else
          (r, s), y'
     | ASSERT (a, y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        addfv r (F.fv (List.hd a)),  ASSERT (a, y', l)
     | IF (a, b, c, y, l) ->
-       let (r1, s1), b' = restore_prog b in
-       let (r2, s2), c' = restore_prog c in
-       let (r3, s3), y' = restore_prog y in
+       (* let nn = !noop in
+       noop := true; *)
+       let (r1, s1), b' = restore_prog locals b in
+       let (r2, s2), c' = restore_prog locals c in
+       let (r3, s3), y' = restore_prog locals y in
+       (* noop := nn; *)
        let r = S.union (S.union r1 r2) r3 in
        let s = S.union (S.union s1 s2) s3 in
        (r, addfvs s (B.fv a)), IF (a, b', c', y', l)
     | WHILE (a, bs, b, c, y, l) ->
        let nn = !noop in
        noop := true;
-       let (r1, s1), b' = restore_prog b in
-       let (r3, s3), y' = restore_prog y in
+       let (r1, s1), b' = restore_prog locals b in
+       let (r3, s3), y' = restore_prog locals y in
        noop := nn;
        let r = S.union r1 r3 in
        let s = S.union s1 s3 in
        (r, addfvs s (B.fv a)), WHILE (a, bs, b', c, y', l)
     | PROCCALL (z, a, b, i, y, l) ->
-       let (r,s), y' = restore_prog y in
+       let (r,s), y' = restore_prog locals y in
        begin
          match z with
            None ->
             (r, addfvs s (List.concat (List.map T.fv b))), PROCCALL (z, a, b, i, y', l)
          | Some z' ->
-            if !noop || E.is_global z' || E.is_param z' || S.mem z' s then
+            if !noop || (* E.is_global z' || E.is_param z' || *) not (List.mem z' locals) || S.mem z' s then
               (r, addfvs s (z'::List.concat (List.map T.fv b))), PROCCALL (z, a, b, i, y', l)
             else
               (r, addfvs s (List.concat (List.map T.fv b))), PROCCALL (None, a, b, i, y', l)
        end
     | CONS (a, b, y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        r, CONS (a, b, y', l)
     | MUTATION (a, b, c, y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        addfv r (T.fv a @ T.fv c), MUTATION (a, b, c, y', l)
     | LOOKUP (a, b, c, y, l) ->
-       let (r, s), y' = restore_prog y in
+       let (r, s), y' = restore_prog locals y in
        if !noop || E.is_global a || E.is_param a || S.mem a s then
          (r, addfvs s (T.fv b)), LOOKUP (a, b, c, y', l)
        else
          (r, s), y'
     (*  r, LOOKUP (a, b, c, y', l) *)
     | DISPOSE (a, y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        addfv r (T.fv a), DISPOSE (a, y', l)
     | MALLOC (a, tl, y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        addfv r (a::E.fv tl), MALLOC (a, tl, y', l)
     | SARRAY (a, b, tl, y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        r, SARRAY (a, b, tl, y', l)
     | MAPS (a, b, y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        r, MAPS (a, b, y', l)
     | PARALLEL (b, c, y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        r, PARALLEL (b, c, y', l)
     | BLOCK (a, y, l) ->
-       let (r1,s1), a' = restore_prog a in
-       let (r2,s2), y' = restore_prog y in
+       let (r1,s1), a' = restore_prog [] a in
+       let (r2,s2), y' = restore_prog locals y in
        (S.union r1 r2, S.union s1 s2), BLOCK (a', y', l)
     | DECL (a, len, init_data, y, l) ->
        begin
+         let locals = a::locals in
          let deal_decl () =
-           let (r,s), y' = restore_prog y in
+           let (r,s), y' = restore_prog locals y in
            let fvlen = List.map E.fv len |> List.concat in
            let fvinit = fv_of_init init_data in
            let s' = addfvs (S.union fvinit s) fvlen in
@@ -740,7 +744,7 @@ let restore_prog structures p =
                 else
                   tl
               in
-              restore_prog (MALLOC (p, tl, y, l))
+              restore_prog locals (MALLOC (p, tl, y, l))
            | IF (b,
                         ASSIGN (c1, T.EXP(E.CONST 1), SKIP, _),
                         ASSIGN (c2, T.EXP(E.CONST 0), SKIP, _),
@@ -749,26 +753,26 @@ let restore_prog structures p =
                                       ASSERT ([(_,[B.UNIT (cv, Op.NE, T.EXP (E.CONST 0))],[],[])],
                                               y,_),_), _),
                         _) when T.toExp cv=cv' && T.toExp cp=a && a=c1 && a=c2 && is_not_in y ->
-                     restore_prog (ASSERT ([([],[b],[],[])],y,l))
+                     restore_prog locals (ASSERT ([([],[b],[],[])],y,l))
                   | LOOKUP (a1, pt, fld,
                             ASSIGN (c, a2, y, _), _) when a=a1 && a=T.toExp a2 && is_not_in y ->
-                     restore_prog (LOOKUP (c, pt, fld, y, l))
+                     restore_prog locals (LOOKUP (c, pt, fld, y, l))
                   | _ ->
                      deal_decl ()
                 else
                   deal_decl ()
        end
     | RETURN (i, y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        addfv r (T.fv i), RETURN (i, y', l)
     | BREAK (y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        r, BREAK (y', l)
     | CONTINUE (y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        r, CONTINUE (y', l)
     | LABEL (lbl, el, y, l) ->
-       let r, y' = restore_prog y in
+       let r, y' = restore_prog locals y in
        r, LABEL (lbl, el, y', l)
   in
-  restore_prog p
+  restore_prog [] p

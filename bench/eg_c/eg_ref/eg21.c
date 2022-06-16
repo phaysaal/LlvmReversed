@@ -17,5 +17,5 @@ int main(){
 	assert(m==n);
 	//m = f2(n);
 	//assert(m==n+1);
-	return 0;
+	return m;
 }

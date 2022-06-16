@@ -18,5 +18,5 @@ int main(){
 	int b = 4;
 	int c = ifwhile(a, b);
 	assert(c==6);
-	return 0;
+	return c;
 }

@@ -1,4 +1,4 @@
 while read p; do
-		echo "To be VERIFIED $p"
+		echo "To be Verified $p"
 		./llvmrev "$p"
-done <bench.txt 2>/dev/null | grep "VER"
+done <bench.txt 2>/dev/null | grep "Veri"
