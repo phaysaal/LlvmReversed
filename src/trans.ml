@@ -62,8 +62,7 @@ let comps = ref [];;
 
 let structures : (string * L.lltype list) list ref = ref [];;
 
-let add_struct lli =
-  let rec is_struct llt =
+let rec is_struct llt =
     match L.classify_type llt with
       TK.Struct ->
       Some llt
@@ -77,7 +76,10 @@ let add_struct lli =
       ->
        is_struct @@ L.element_type llt
     | _ -> None
-  in
+;;
+    
+let add_struct lli =
+  
   let llt = L.type_of lli in
 
   match is_struct llt with
@@ -88,7 +90,10 @@ let add_struct lli =
      let l_flds = Array.to_list flds in
      match nm with
        Some snm ->
-       structures := !structures @ [(snm, l_flds)]
+        if List.exists (function (s,_) -> s=snm) !structures then
+          ()
+        else
+          structures := !structures @ [(snm, l_flds)]
      | None ->
         ()
 ;;
@@ -141,6 +146,8 @@ let rec get_constant lli =
        get_constant @@ L.operand lli 0
 ;;
 
+let is_a_struct = List.exists (function E.STRUCT _ -> true | _ -> false)
+;;
 
 let rec remove_first_ptr = function
     [] -> []
@@ -150,42 +157,6 @@ let rec remove_first_ptr = function
 let is_a_func = function
     E.FUNC _ -> true
   | _ -> false
-
-let get_var vars ?(is_global=false) ?(is_param=false) ?(is_local=false) ?(addr=false) lli =
-  let vn' = L.value_name lli in
-  let vn = if L.classify_value lli = VK.GlobalVariable then "@" ^ vn' else vn' in
-  F.dbgf "VAR" "\nGet_Var|vn: %s" vn;
-  let vars', v=
-    if VR.mem vn vars && not is_param && not is_local then
-      begin
-        F.dbgf "VAR" "Get_Var|lli: %s" (stv lli);
-        let tp = L.type_of lli in
-        F.dbgf "VAR" "Get_Var|type: %s" (L.string_of_lltype tp);
-        let attr_now = Types.get_types tp in 
-        let attr_org = get_attr vars true vn in
-        if addr && not(List.exists is_a_func attr_now) && List.mem E.PTR attr_now && not (List.mem E.PTR attr_org) then
-          vars, E.ADDR (B.var vn attr_org) 
-        else
-          vars, B.var vn attr_org 
-      end
-    else
-      begin
-        F.dbgf "VAR" "Get_Var|lli: %s" (stv lli);
-        let tp = L.type_of lli in
-        F.dbgf "VAR" "Get_Var|type: %s" (L.string_of_lltype tp);
-        let attr = Types.get_types tp in 
-        let attr' = if is_global then E.GLOBAL::attr else if is_param then E.PARAM::attr else attr in
-        let attr'' =
-          if is_param then
-            attr'
-          else
-            remove_first_ptr attr' in
-        let vars' = VR.add vn attr'' vars in
-        vars', B.var vn attr''
-      end in
-  F.dbgf "VAR" "Get_Var|var: %a" E.fstr v;
-  vars', v
-;;
 
 let is_declared v =
   List.mem v !B.declared
@@ -292,6 +263,7 @@ let is_null lli =
   vk = L.ValueKind.NullValue || vk = ConstantPointerNull
 ;;
 
+
 let rec is_array llty =
   let ty = Llvm.classify_type llty in
   match ty with
@@ -305,37 +277,53 @@ let rec is_array llty =
 
 let rec get_exp_from_llvalue ?(addr=false) vars lli =
   let ps, v =
-    if is_const_int lli then
-      begin
+    let vk = L.classify_value lli in
+    match vk with
+      VK.ConstantInt
+      ->                       
+      begin                                              F.dbgf "VAL" "%s is Constant_int" (stv lli);
         let r =
           match L.int64_of_const lli with
-            Some s -> (Int64.to_int s)
+            Some s ->
+             (Int64.to_int s)
           | None ->
              begin
-               Printf.printf "Error at get_exp_from_llvalue\n";
+               F.dbgf "VAL" "Error at get_exp_from_llvalue (int)";
                raise (Err "Not an integer (get_exp_from_llvalue)")
              end
         in
         [], B.const r
       end
-    else if is_const_exp lli then
-      begin
+    | VK.ConstantExpr ->
+      begin                                              F.dbgf "VAL" "%s is Constant_exp" (stv lli);
         get_const_expr vars lli
       end
-    else if is_null lli then
-      begin
+    | VK.NullValue | ConstantPointerNull ->
+      begin                                              F.dbgf "VAL" "%s is Null" (stv lli);
         [], B.const 0
       end
-    else
-      begin
+    | VK.ConstantFP ->
+       begin
+         let flv = L.float_of_const lli in
+         match flv with
+           Some f ->
+           [], B.constf f
+         | None ->
+            begin
+              F.dbgf "VAL" "Error at get_exp_from_llvalue (double)";
+              raise (Err "Not an integer (get_exp_from_llvalue)")
+            end
+       end
+    | _ ->
+      begin                                              F.dbgf "VAL" "%s is %s" (stv lli) (P.print_value_kind @@ L.classify_value lli);
         let s = L.value_name lli in
         if s = "" then
-          begin
+          begin                                          F.dbgf "VAL" "%s is ''" s;
             let r = get_exp_from_ref vars lli in
             r
           end
         else
-          begin
+          begin                                          F.dbgf "VAL" "%s is not ''" s;
             let _, r = get_var vars ~addr:addr lli in
             [], r
           end
@@ -385,6 +373,7 @@ and get_ptr_element vars lli =
     begin      
       let arr = L.operand lli 0 in
       let _, e_arr = get_var vars arr in
+      F.dbgf "GEP" "arr: %s {(%a)}" (stv arr) E.fstr e_arr;
       (* let arr0 = L.operand arr 0 in *)
       let ty = L.type_of arr in
       let tp = ty |> L.classify_type in
@@ -396,6 +385,7 @@ and get_ptr_element vars lli =
        *)
       if is_array ty then
         begin
+          F.dbgf "GEP" "Array in GEP";
          let idx = L.operand lli 2 in
          let ps, e_idx = get_exp_from_llvalue vars idx in
          let s_fld = "*" in
@@ -403,34 +393,48 @@ and get_ptr_element vars lli =
          ps, (ptr, s_fld)
         end
       else
-        
-      match tp with
-      | L.TypeKind.Array ->
-         let idx = L.operand lli 2 in
-         let ps, e_idx = get_exp_from_llvalue vars idx in
-         let s_fld = "*" in
-         let ptr = B.add e_arr e_idx |> B._T in
-         ps, (ptr, s_fld)
-      | Pointer ->
-         let idx = L.operand lli 1 in
-         let ps, e_idx = get_exp_from_llvalue vars idx in
-         let s_fld = "-" in
-         let ptr = B.add e_arr e_idx |> B._T in
-         ps, (ptr, s_fld)     
-      | _ ->
-         let idx = L.operand lli 1 in
-         let ps, e_idx = get_exp_from_llvalue vars idx in
-         let ptr = B.add e_arr e_idx |> B._T in
-         if L.num_operands lli < 3 then
-           ps, (ptr, "*")
-         else
-           begin
-             
-             let fld = L.operand lli 2 in
-             let ps, e_fld = get_exp_from_llvalue vars fld in
-             let s_fld = V.Exp.fstr () e_fld in
-             ps, (ptr, s_fld)
-         end
+        match tp with
+        | L.TypeKind.Array ->
+           F.dbgf "GEP" "tp Array";
+           let idx = L.operand lli 2 in
+           let ps, e_idx = get_exp_from_llvalue vars idx in
+           let s_fld = "*" in
+           let ptr = B.add e_arr e_idx |> B._T in
+           ps, (ptr, s_fld)
+        | Pointer ->
+           if is_struct ty <> None then
+             begin
+               F.dbgf "GEP" "tp Pointer & Struct";
+               let idx = L.operand lli 2 in
+               let ps, e_idx = get_exp_from_llvalue vars idx in
+               let s_fld = E.fstr () e_idx in
+               let ptr = B._T e_arr in
+               ps, (ptr, s_fld)
+             end
+           else
+             begin
+               F.dbgf "GEP" "tp Pointer & not Struct";
+               let idx = L.operand lli 1 in
+               let ps, e_idx = get_exp_from_llvalue vars idx in
+               let s_fld = "*" in
+               let ptr = B.add e_arr e_idx |> B._T in
+               ps, (ptr, s_fld)
+               end
+        | _ ->
+           F.dbgf "GEP" "tp Else";
+           let idx = L.operand lli 1 in
+           let ps, e_idx = get_exp_from_llvalue vars idx in
+           let ptr = B.add e_arr e_idx |> B._T in
+           if L.num_operands lli < 3 then
+             ps, (ptr, "*")
+           else
+             begin
+               
+               let fld = L.operand lli 2 in
+               let ps, e_fld = get_exp_from_llvalue vars fld in
+               let s_fld = V.Exp.fstr () e_fld in
+               ps, (ptr, s_fld)
+             end
     end
   
 and get_const_expr vars lli =
@@ -450,7 +454,7 @@ and get_const_expr vars lli =
           let attr' = List.filter (function E.GLOBAL | E.ARRAY _ | E.PTR -> false | _ -> true) attr in
           let frv = fresh_var attr' in
           let p1 = B.decl frv 1 in
-          let p2 = B.lookup frv pt fld in
+          let p2 = if fld = "-" then B.assign frv pt else B.lookup frv pt fld in
           let p = B.join_at_last p2 p1 in
           p::ps, frv
         end
@@ -459,6 +463,41 @@ and get_const_expr vars lli =
     end
   else
     raise (Err ("GetConstExpr| Unsupported Number of Operands " ^ (string_of_int opn)))
+
+and get_var vars ?(is_global=false) ?(is_param=false) ?(is_local=false) ?(addr=false) ?(alloca=false) lli =
+  let vn'' = L.value_name lli in
+  let vn' = if vn'' = "" then
+              get_exp_from_ref vars lli |> snd |> E.toStr
+            else
+              vn'' in
+  let vn = if L.classify_value lli = VK.GlobalVariable then "@" ^ vn' else vn' in            F.dbgf "VAR" "\nGet_Var(%s)|vn: %s" vn vn;
+  let vars', v=
+    if VR.mem vn vars && not is_param && not is_local then
+      begin                                                                                  F.dbgf "VAR" "Get_Var(%s)|lli: %s" vn (stv lli);
+        let tp = L.type_of lli in                                                            F.dbgf "VAR" "Get_Var(%s)|type: %s" vn (L.string_of_lltype tp);
+        let attr_now = Types.get_types tp in 
+        let attr_org = get_attr vars true vn in
+        if addr && not(List.exists is_a_func attr_now) && List.mem E.PTR attr_now && not (List.mem E.PTR attr_org) then
+          vars, E.ADDR (B.var vn attr_org) 
+        else
+          vars, B.var vn attr_org 
+      end
+    else
+      begin                                                                                  F.dbgf "VAR" "Get_Var(%s)|lli: %s" vn (stv lli);
+        let tp = L.type_of lli in                                                            F.dbgf "VAR" "Get_Var(%s)|type: %s" vn (L.string_of_lltype tp);
+                                                                                             F.dbgf "VAR" "Get_Var(%s)|type: %s" vn (P.string_of_type tp);
+        let attr = Types.get_types tp in                                                     F.dbgf "VAR" "Get_Var(%s)|type: %s | %a" vn (P.string_of_type tp) (F.fstrL (fun () a -> a) ",") (List.map E.print_attr attr);
+        let attr' = if is_global then E.GLOBAL::attr else if is_param then E.PARAM::attr else attr in
+        let attr'' =
+          if is_param || (not alloca && is_a_struct attr') then (** 6/8: || is_a_struct attr' *)
+            attr'
+          else
+            remove_first_ptr attr' in
+        let v = B.var vn attr'' in                                                           F.dbgf "VAR" "|Get_Var(%s)|attr'': %a" vn (F.fstrL (fun () a -> a) ",") (List.map E.print_attr attr'');
+        let vars' = VR.add vn attr'' vars in
+        vars', v
+      end in                                                                                 F.dbgf "VAR" "Get_Var(%s)|var: %a" vn E.fstr v;
+  vars', v
 ;;
 
 let details vars lli =
@@ -469,7 +508,7 @@ let details vars lli =
   F.pf_s "DET" P.print_type tp;
   
   F.dbgf "DET" "type: %s" (L.string_of_lltype tp);
-  F.dbgf "DET" "typ_class: %s" (P.string_of_type (L.classify_type tp));
+  F.dbgf "DET" "typ_class: %s" (P.string_of_type tp);
   begin
     match get_array_type tp with
     Some tp ->
@@ -489,10 +528,58 @@ let details vars lli =
   F.dbgf "DET" "-----------";
 ;;
 
+let mk_i_pred e_arg1 e_arg2 = function
+    L.Icmp.Slt
+  | L.Icmp.Ult ->
+    BX.UNIT (B._T e_arg1, V.Op.LE, B._T e_arg2)
+  |  L.Icmp.Sgt
+     |  L.Icmp.Ugt ->
+      BX.UNIT (B._T e_arg2, V.Op.LE, B._T e_arg1)
+  |  L.Icmp.Sle
+     |  L.Icmp.Ule ->
+      BX.OP (
+          BX.UNIT (B._T e_arg1, V.Op.LE, B._T e_arg2), V.Op.OR,
+          BX.UNIT (B._T e_arg1, V.Op.EQ, B._T e_arg2))
+  |  L.Icmp.Sge
+     |  L.Icmp.Uge ->
+      BX.OP (
+          BX.UNIT (B._T e_arg2, V.Op.LE, B._T e_arg1), V.Op.OR,
+          BX.UNIT (B._T e_arg2, V.Op.EQ, B._T e_arg1))
+  |  L.Icmp.Eq ->
+      BX.UNIT (B._T e_arg1, V.Op.EQ, B._T e_arg2)
+  |  L.Icmp.Ne ->
+      BX.UNIT (B._T e_arg1, V.Op.NE, B._T e_arg2)
+;;
+
+let mk_f_pred e_arg1 e_arg2 = function
+  (*  L.Fcmp.Slt
+  |  L.Icmp.Ult ->
+      BX.UNIT (B._T e_arg1, V.Op.LE, B._T e_arg2)
+  |  L.Icmp.Sgt
+     |  L.Icmp.Ugt ->
+      BX.UNIT (B._T e_arg2, V.Op.LE, B._T e_arg1)
+  |  L.Icmp.Sle
+     |  L.Icmp.Ule ->
+      BX.OP (
+          BX.UNIT (B._T e_arg1, V.Op.LE, B._T e_arg2), V.Op.OR,
+          BX.UNIT (B._T e_arg1, V.Op.EQ, B._T e_arg2))
+  |  L.Icmp.Sge
+     |  L.Icmp.Uge ->
+      BX.OP (
+          BX.UNIT (B._T e_arg2, V.Op.LE, B._T e_arg1), V.Op.OR,
+          BX.UNIT (B._T e_arg2, V.Op.EQ, B._T e_arg1)) *)
+  |  L.Fcmp.Oeq ->
+      BX.UNIT (B._T e_arg1, V.Op.EQ, B._T e_arg2)
+  (* |  L.Icmp.Ne ->
+      BX.UNIT (B._T e_arg2, V.Op.NE, B._T e_arg1) *)
+  | _ -> raise (Err "Not compatible yet.")              
+;;
+
+
 let rec get_bexp_from_comp vars lli =
   let opcode = L.instr_opcode lli in
   match opcode with
-    O.ICmp ->
+    O.ICmp | FCmp ->
      let arg1 = L.operand lli 0 in
      let arg2 = L.operand lli 1 in
      F.dbgf "BEXP" "arg1: %s" (stv arg1);
@@ -503,27 +590,18 @@ let rec get_bexp_from_comp vars lli =
      begin
        let res = 
          match pred with
-           Some L.Icmp.Slt
-         | Some L.Icmp.Ult ->
-            BX.UNIT (B._T e_arg1, V.Op.LE, B._T e_arg2)
-         | Some L.Icmp.Sgt
-           | Some L.Icmp.Ugt ->
-            BX.UNIT (B._T e_arg2, V.Op.LE, B._T e_arg1)
-         | Some L.Icmp.Sle
-           | Some L.Icmp.Ule ->
-            BX.OP (
-                BX.UNIT (B._T e_arg1, V.Op.LE, B._T e_arg2), V.Op.OR,
-                BX.UNIT (B._T e_arg1, V.Op.EQ, B._T e_arg2))
-         | Some L.Icmp.Sge
-           | Some L.Icmp.Uge ->
-            BX.OP (
-                BX.UNIT (B._T e_arg2, V.Op.LE, B._T e_arg1), V.Op.OR,
-                BX.UNIT (B._T e_arg2, V.Op.EQ, B._T e_arg1))
-         | Some L.Icmp.Eq ->
-            BX.UNIT (B._T e_arg2, V.Op.EQ, B._T e_arg1)
-         | Some L.Icmp.Ne ->
-            BX.UNIT (B._T e_arg2, V.Op.NE, B._T e_arg1)
-         | _ -> raise (Err "Not compatible yet.")
+           Some op -> mk_i_pred e_arg1 e_arg2 op
+         | None ->
+            begin
+              let pred = L.fcmp_predicate lli in
+              let res = 
+                match pred with
+                  Some op ->
+                   mk_f_pred e_arg1 e_arg2 op
+                | None -> raise (Err "Not compatible yet.")
+              in
+              res
+            end
        in
        ps1@ps2, res
      end
@@ -733,12 +811,31 @@ let mk_assign_maybe vars lli o =
        p
     | O.Or
       | O.And
-    | _ -> B.SKIP
+      | _ -> B.SKIP
+
+let rec indirect_src dest vars lli =
+  let nm = L.value_name lli in
+  let _, e_src = try get_exp_from_llvalue vars lli with e -> raise e in
+  match L.classify_value lli with
+    VK.Instruction O.GetElementPtr ->
+     let ps, (ptr, fld) = get_ptr_element vars lli in
+     if fld = "-" then
+       add_ps ps @@ B.assign dest ptr
+     else
+       add_ps ps @@ B.lookup dest ptr fld
+  | VK.Instruction O.Load ->
+     if VR.mem nm vars then
+       B.assign dest (B._T e_src)
+     else
+       indirect_src dest vars @@ L.operand lli 0
+  | _ ->
+     B.assign dest (B._T e_src)
+;;
 
 let rec to_while_t_inst vars lli =
   let st l = L.string_of_llvalue l in
   let str = st lli in
-  F.dbg "DEB" "Current Instr:" F.p str;
+  F.dbg "CUR" "Current Instr:" F.p str;
   let opcode = try L.instr_opcode lli with  _ -> pf "OPCode - 1"; raise (OPC "OpCode -1") in
   let vars', r =
     match opcode with
@@ -772,7 +869,7 @@ let rec to_while_t_inst vars lli =
                          let t_vname = B._T e_vname in
                          let p2 = B.return t_vname in
                          let ps2, (ptr, fld) = get_ptr_element vars dt in
-                         let p1 = B.lookup e_vname ptr fld in
+                         let p1 = if fld = "-" then B.assign e_vname ptr else B.lookup e_vname ptr fld in
                          let p = B.join_at_last p2 p1 in
                          add_ps ps2 p
                        end
@@ -800,7 +897,7 @@ let rec to_while_t_inst vars lli =
               | X86_mmx ->
                  B.return (B._T @@ V.Exp.CONST 0)
               | _ ->
-                 F.dbgf "RET" "Type: %s\n" (P.string_of_type tv);
+                 F.dbgf "RET" "Type: %s\n" (P.string_of_type ty);
                  pf "Other kinds of return: %d %s\n" (L.num_operands lli) (L.string_of_llvalue lli);
                  B.SKIP
            in
@@ -833,7 +930,8 @@ let rec to_while_t_inst vars lli =
        vars, mk_assign_maybe vars lli O.Or
     |	O.Alloca ->
        begin
-         let vars', v = get_var vars ~is_local:true lli in
+         let vars', v = get_var vars ~is_local:true ~alloca:true lli in
+         F.dbgf "DEB1" "(%a) %s" E.fstr v (stv lli);
          let tp = L.type_of lli in
          match get_array_type tp with
            Some tp ->
@@ -845,7 +943,7 @@ let rec to_while_t_inst vars lli =
          | None ->
             let op = L.operand lli 0 in
             let ps, size = get_exp_from_llvalue vars op in
-            F.dbgf "DEB" "size:  %a" E.fstr size;
+            F.dbgf "DEB1" "(%a) size:  %a" E.fstr v E.fstr size;
             add_struct lli;
             begin
               match size with
@@ -853,14 +951,14 @@ let rec to_while_t_inst vars lli =
                  if sz > 1 then
                    begin
                      let r = B.decl v sz in
-                     F.pf_s "DEB" (B.pprint 0) r;
-                     F.dbgf "DEB" "...............";
+                     F.pf_s "DEB1" (B.pprint 0) r;
+                     F.dbgf "DEB1" "...............";
                      vars', add_ps ps r
                    end
                  else
                    begin
-                     F.dbgf "DEB" "Non-Array";
-                     let vars', v = get_var vars ~is_local:true lli in
+                     F.dbgf "DEB1" "Non-Array";
+                     (* let vars', v = get_var vars ~is_local:true lli in *)
                      let r = B.decl v 1 in
                      vars', add_ps ps r
                    end
@@ -883,51 +981,53 @@ let rec to_while_t_inst vars lli =
          let p = B.assign e_dest t_src in
          vars', add_ps ps p
     |	Store ->
-       let src = L.operand lli 0 in
-       let dest = L.operand lli 1 in
-       F.dbgf "DEB" "Dest:%s" (stv dest); 
-       let vars', dest_v = get_var vars dest in
+       let src = L.operand lli 0 in                                            
+        
+       let ps, e_src = try get_exp_from_llvalue vars src with e -> raise e in  F.dbgf "STO" "Src: %a" E.fstr e_src;
+       let dest = L.operand lli 1 in                                           F.dbgf "STO" "Dest:%s" (stv dest); 
        if is_indirect dest then
-         begin
-           F.dbgf "DEB" "Indirect Case";
-           let vars'', destv' = L.operand dest 0 |> get_var vars' in
-           let ps, e_src = try get_exp_from_llvalue vars'' src with e -> pf "STore\n"; raise e in
+         begin                                                                 F.dbgf "STO" "Indirect Case";
+           let vars'', destv' = L.operand dest 0 |> get_var vars in
            vars'', add_ps ps @@ B.mutation (B._T destv') "*" (B._T e_src)
          end
        else if is_ptr_element dest then
-         begin
-           F.dbgf "DEB" "Ptr_Element Case";
-           let ps, e_src = try (get_exp_from_llvalue vars' src) with e ->
-                         pn str;
-                         pf "Store array element B\n"; raise e in
-           let ps2, (ptr, fld) = get_ptr_element vars' dest in
-           vars', add_ps (ps@ps2) @@ B.mutation ptr fld (B._T e_src)
+         begin                                                                 F.dbgf "STO" "Ptr_Element Case";
+           let ps2, (ptr, fld) = get_ptr_element vars dest in                 F.dbgf "STO" "%s: %a %s" (stv lli) T.fstr ptr fld;
+           let p = if fld="-" then
+                     B.assign (T.toExp ptr) (B._T e_src)
+                   else
+                     B.mutation ptr fld (B._T e_src) in
+           vars, add_ps (ps@ps2) p
          end
        else if is_const src then
-         begin
-           let ps, e_src = try get_exp_from_llvalue vars' src with e -> pf "Store array element C\n"; raise e in
+         begin                                                                 F.dbgf "STO" "Const source";
+           let vars', dest_v = get_var vars dest in
            vars', add_ps ps @@ B.assign dest_v (B._T e_src)
          end
-       
        else if is_pointer src then
-         begin
-           let ps1, t_src = get_exp_from_llvalue vars' src in
-           let ps2, v_dest = get_exp_from_llvalue vars' dest in
-           vars', add_ps (ps1@ps2) @@ B.assign v_dest (B._T t_src)
+         begin                                                                 F.dbgf "STO" "Pointer Src";
+           let ps1, t_src = get_exp_from_llvalue vars src in
+           let ps2, v_dest = get_exp_from_llvalue vars dest in
+           vars, add_ps (ps1@ps2) @@ B.assign v_dest (B._T t_src)
          end
        else
-         begin
-           let ps1, t_src = get_exp_from_llvalue vars' src in
-           let ps2, v_dest = get_exp_from_llvalue vars' dest in
-           vars', add_ps (ps1@ps2) @@ B.assign v_dest (B._T t_src)
+         begin                                                                 F.dbgf "STO" "Else Src";
+           let ps1, e_src = get_exp_from_llvalue vars src in
+           let ps2, v_dest = get_exp_from_llvalue vars dest in
+           let p = indirect_src v_dest vars src in
+           vars, add_ps (ps1@ps2) p
          end
     |	GetElementPtr ->
        let vn = L.value_name lli in
-       if vn = "" then
-         vars, B.SKIP
+       if vn = "" (* || not (VR.mem vn vars) *) then (** 6/16: || not (VR.mem vn vars) *)
+         begin
+           F.dbgf "GEP" "vn is '' or vn not in vars";
+           vars, B.SKIP
+         end
        else
          begin
            try
+             F.dbgf "GEP" "vn is not '' and vn in vars";
              let vars', e_vname = get_var vars lli in
              
              let ps, (ptr, fld) = get_ptr_element vars' lli in
@@ -993,7 +1093,8 @@ let rec to_while_t_inst vars lli =
          vars', add_ps ps @@ B.assign dest_v (B._T src_exp)
     |	BitCast ->
        vars, mk_assign_maybe vars lli O.BitCast
-    |	O.ICmp ->
+    |	O.ICmp
+      | FCmp ->
        let vn = L.value_name lli in
        if vn = "" || List.mem lli !comps then
          vars, B.SKIP
@@ -1015,7 +1116,7 @@ let rec to_while_t_inst vars lli =
            let called_fun = get_call lli in
            let vars', fname = get_called_fname vars called_fun in
            let sname = fst @@ E.decode fname in
-           if sname = "malloc" then
+           if sname = "malloc" || sname = "_Znwm" then
              begin
                let op1 = L.operand called_fun 0 in
                let ps1, size = try get_exp_from_llvalue vars' op1 with e -> pf "Store array element D\n"; raise e in
@@ -1032,6 +1133,8 @@ let rec to_while_t_inst vars lli =
              let bexp = BX.UNIT (T.zero, V.Op.NE, T.zero) in
              let p = B.mk_assert bexp in
              vars', p
+           else if sname = "llvm_memset_p0i8_i64" then
+             vars, B.SKIP
            else
              begin
                
@@ -1972,46 +2075,58 @@ let enblock = function
   | p -> B.block p
 ;;
 
+let convert_struct =
+  (fun (snm, flds) ->
+    let e_flds = List.mapi (fun i fld_ty ->
+                     let n = string_of_int i in
+                     let v = B.var n (Types.get_types fld_ty) in
+                     v, B.T.NULL
+                   ) flds in
+    (F.corr_structname snm, e_flds, None)
+    )
+
 let parse_func vars f =
   B.reset_declaration ();
   let blk_arr = Llvm.basic_blocks f in
   let vars', name = get_var vars f in
   current_func := name;
-  F.dbgf "FUNC" "-------------------- %a" E.fstr name;
+  F.dbgf "DEB" "Begin: %a" E.fstr name;
   let n = (Array.length blk_arr - 1) in
-  let arr_prms = L.params f in
-  let vars'', prms = Array.fold_left (fun (_vars, acc) a ->
-                         let _vars', a' = get_var _vars ~is_param:true a in
-                         B.add_to_declared a';
-                          _vars',  acc@[a']
-                       ) (vars',[]) arr_prms  in
-  let vars'3 = VR.add continue [] @@ VR.add break [] vars'' in
-  
-  let pkg : pkg = (blk_arr, vars'3, f) in
-  let vars'3, b = parse_program pkg (0, n) in
-  let _, b' = B.restore_prog b in
-  
-  let p = Procedure.mk_procedure name prms (enblock b') in
-  
-  vars'3, p
+
+  if n = -1 then
+    vars, Procedure.mk_procedure name [] (enblock B.SKIP)
+  else
+    begin
+      let arr_prms = L.params f in
+      let vars'', prms = Array.fold_left (fun (_vars, acc) a ->
+                             let _vars', a' = get_var _vars ~is_param:true a in
+                             B.add_to_declared a';
+                             _vars',  acc@[a']
+                           ) (vars',[]) arr_prms  in
+      let vars'3 = VR.add continue [] @@ VR.add break [] vars'' in
+      
+      let pkg : pkg = (blk_arr, vars'3, f) in
+      let vars'3, b = parse_program pkg (0, n) in
+      let structs = List.fold_left (fun ss ((snm,flds) as s) -> VR.add (F.corr_structname snm) (convert_struct s) ss) VR.empty !structures in
+      
+      let _, b' = B.restore_prog structs b in
+      
+      let p = Procedure.mk_procedure name prms (enblock b') in
+      F.dbgf "DEB" "End: %a" E.fstr name;
+      vars'3, p
+    end
 ;;
 
 
 
 let translate_structures gs =
   let g_structures : G.t list =
-    List.map (fun (snm, flds) ->
-        let e_flds = List.mapi (fun i fld_ty ->
-                         let n = string_of_int i in
-                         let v = B.var n (Types.get_types fld_ty) in
-                         v, B.T.NULL
-                       ) flds in
-        G.STRUCT ((snm, e_flds, None), B.dl)
-      ) !structures in
+    List.map convert_struct !structures |> List.map (fun x -> G.STRUCT (x, B.dl)) in
   gs @ g_structures
 ;;
 
 let translate_global vars g =
+  
   let vars', nm = get_var vars ~is_global:true g in
   let opn = L.num_operands g in
   let r =
@@ -2055,11 +2170,11 @@ let translate file =
   (* Llvm.iter_functions Print.print_fun llm ; *)
   Printf.printf "*** Translation ***\n" ; *)
   let _, fs = L.fold_left_functions (fun (_vars, acc) f ->
-                  let _vars',f' = parse_func _vars f in
+                  let _vars',f' = parse_func vars' f in
                   _vars', acc @[f']) (vars',[]) llm  in
   
   let gs2   = List.map (fun (func_name, params, body) ->
                   write_func func_name file params body) fs in
   let gs    = translate_structures (gs1@gs2) in
-  List.iter (fun g -> Global.pprint g) gs;
+  (* List.iter (fun g -> Global.pprint g) gs; *)
   gs

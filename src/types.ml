@@ -7,7 +7,7 @@ module P = Print
           
 let rec get_types ty =
   let tp = L.classify_type ty in
-  F.dbgf "VAR" "Type: %s" (P.string_of_type tp);
+  F.dbgf "VAR" "Type: %s" (P.string_of_type ty);
   match tp with
     LT.Integer ->
      let n = L.integer_bitwidth ty in
@@ -27,7 +27,7 @@ let rec get_types ty =
   |	Struct ->
      let stn =
        match L.struct_name ty with
-         Some s -> s
+         Some s -> (F.corr_structname s)
        | None -> ""
      in
      [E.STRUCT stn] (* @ get_types @@ L.element_type ty *)

@@ -488,7 +488,7 @@ module Exp = struct
            
   let var = fst
           
-  let is_ptr = function VAR (_, attrs) -> List.exists (fun x -> match x with PTR -> true | _ -> false) attrs | _ -> false
+  let is_ptr = function VAR (_, attrs) -> List.exists (function PTR -> true | _ -> false) attrs | _ -> false
                           
   let is_ptrptr = function VAR (_, attrs) ->  List.exists (fun x -> match x with PTRPTR -> true | _ -> false) attrs | _ -> false
                            

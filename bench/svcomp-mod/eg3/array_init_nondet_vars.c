@@ -23,7 +23,10 @@ int main()
     a[i]=i+j+k;
   }
 
-  for(i=1;i<n;i++)
-    __VERIFIER_assert(a[i]>=(i+2));
+  for(i=1;i<n;i++){
+    int nn;
+    nn = a[i];
+    assert(nn>=(i+2));
+  }
   return 0;
 }  

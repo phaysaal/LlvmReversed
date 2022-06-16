@@ -43,7 +43,6 @@ let manage_dirs () =
   compacted_dir := !trans_dir ^ "Compacted/";
   transformed_dir := !trans_dir ^ "FPTransformed/";
 
-  F.pn slac_dir;
   checkdir lr_dir;
   checkdir slac_dir;
   checkdir !comp_dir;
@@ -141,8 +140,7 @@ let rec read_config ic =
 ;;
 
 let configure () =
-  let s = Sys.command ("ls .conf") in
-  if s = 0 then
+  if Sys.file_exists ".conf" then
     begin
       let ic = open_in ".conf" in
       try

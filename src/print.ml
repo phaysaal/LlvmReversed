@@ -41,7 +41,7 @@ let rec print_blks ind i j blk_arr =
     ()
 ;;
 
-let string_of_type = function
+let rec string_of_typeval = function
   |	L.TypeKind.Void -> "void"
   |	Half -> "half"
   |	Float -> "float"
@@ -87,6 +87,7 @@ let print_value_kind = function
   | _ -> "Other Kind Value"
 ;;
 
+
 let rec print_type llty =
   let ty = Llvm.classify_type llty in
   match ty with
@@ -98,6 +99,19 @@ let rec print_type llty =
   | Llvm.TypeKind.Struct   -> Printf.printf "  struct\n" ;
   | _                      -> Printf.printf "  other type\n"
 ;;
+
+let rec string_of_type llty =
+  let ty = Llvm.classify_type llty in
+  match ty with
+  | Llvm.TypeKind.Integer  -> "integer"
+  | Llvm.TypeKind.Function -> "function"
+  | Llvm.TypeKind.Array    -> "array " ^ string_of_type (L.element_type llty)
+  | Llvm.TypeKind.Pointer  -> "pointer " ^ string_of_type (L.element_type llty)
+  | Llvm.TypeKind.Vector   -> "vector " ^ string_of_type (L.element_type llty)
+  | Llvm.TypeKind.Struct   -> "struct" ;
+  | _                      -> "other type\n"
+;;
+
 
 
     (*Llvm.dump_module llm ;*)

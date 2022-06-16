@@ -484,3 +484,13 @@ let split delim (str : string) : string list =
     let (prevs, cur) = f |->> (([],[]), ls) in
     List.rev (to_string (List.rev cur)::prevs)
 ;;
+
+let corr_structname s =
+  String.map (function '.' -> '_' | c -> c) s
+
+let corr_fieldname f =
+  let i =  Char.code (String.get f 0) in
+  if Char.code '0' <= i && i <= Char.code '9' then
+    "field_" ^ f
+  else
+    f
