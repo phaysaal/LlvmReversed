@@ -3,4 +3,4 @@ bench/*/*/*.out
 bench/*/*/*~
 bench/*/*_LlvmRev/
 src/*~
-.conf~
+*~
