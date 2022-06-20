@@ -274,6 +274,16 @@ let corr_id v =
 let var x attr = E.VAR (corr_id x, attr) ;;
 let ret attr = var "__RET__" attr |> _T;;
 
+let fresh = ref 0;;
+
+let fresh_var attr =
+  let v = string_of_int !fresh in
+  let r = var ("FR_" ^ v) attr in
+  fresh := !fresh + 1;
+  r
+;;
+
+
 let op s = match s with
   | _ -> raise (Err s)
 ;;
@@ -776,3 +786,187 @@ let restore_prog structures p =
        r, LABEL (lbl, el, y', l)
   in
   restore_prog [] p
+
+
+let adjust_ptr vars p =
+  let module VR = Map.Make(String) in
+
+  let term_to_ref b =
+    let fvb = T.fv b in
+    let pre, v_map =
+         List.fold_left (fun (pre, v_map) v ->
+             let vn, attr = E.decode v in
+             if VR.mem vn vars then
+               let attr' = VR.find vn vars in
+               if not (E.is_ptr v) && List.mem E.PTR attr' then
+                 let nv = fresh_var attr in
+                 let p = lookup nv (_T v) "*" in
+                 let pre' = join_at_last pre p in
+                 let v_map' = (v, nv)::v_map in
+                 (pre', v_map')
+               else
+                 (pre, v_map)
+             else
+               (pre, v_map)
+           ) (SKIP, []) fvb in
+       let b' = List.fold_left (fun b (x,y) -> T.substitute (_T x) (_T y) b) b v_map in 
+       b', pre
+  in
+  
+  let rec adjust_ptr locals p =
+    match p with
+    | SKIP -> p
+    | FAIL -> p
+    | ASSIGN (a, b, y, l) ->
+       let y' = adjust_ptr locals y in
+       let b', pre = term_to_ref b in
+       let p =
+         let an, attr = E.decode a in
+         if VR.mem an vars then
+           let attr' = VR.find an vars in
+           if not (E.is_ptr a) && List.mem E.PTR attr' then
+             mutation (_T a) "*" b' 
+           else
+             ASSIGN (a, b',y',l)
+         else
+           ASSIGN (a, b',y',l)
+       in
+       join_at_last p pre
+    | ASSERT (a, y, l) ->
+       let y' = adjust_ptr locals y in
+       ASSERT (a, y', l) 
+    | IF (a, b, c, y, l) ->
+       let b' = adjust_ptr locals b in
+       let c' = adjust_ptr locals c in
+       let y' = adjust_ptr locals y in
+       IF (a, b', c', y', l)
+    | WHILE (a, bs, b, c, y, l) ->
+       let b' = adjust_ptr locals b in
+       let y' = adjust_ptr locals y in
+       WHILE (a, bs, b', c, y', l)
+    | PROCCALL (z, a, b, i, y, l) ->
+       let y' = adjust_ptr locals y in
+       PROCCALL (z, a, b, i, y', l)
+    | CONS (a, b, y, l) ->
+       let y' = adjust_ptr locals y in
+       CONS (a, b, y', l)
+    | MUTATION (a, b, c, y, l) ->
+       let y' = adjust_ptr locals y in
+       MUTATION (a, b, c, y', l)
+    | LOOKUP (a, b, c, y, l) ->
+       let y' = adjust_ptr locals y in
+       LOOKUP (a, b, c, y', l)
+    | DISPOSE (a, y, l) ->
+       let y' = adjust_ptr locals y in
+       DISPOSE (a, y', l)
+    | MALLOC (a, tl, y, l) ->
+       let y' = adjust_ptr locals y in
+       MALLOC (a, tl, y', l)
+    | SARRAY (a, b, tl, y, l) ->
+       let y' = adjust_ptr locals y in
+       SARRAY (a, b, tl, y', l)
+    | MAPS (a, b, y, l) ->
+       let y' = adjust_ptr locals y in
+       MAPS (a, b, y', l)
+    | PARALLEL (b, c, y, l) ->
+       let y' = adjust_ptr locals y in
+       PARALLEL (b, c, y', l)
+    | BLOCK (a, y, l) ->
+       let a' = adjust_ptr [] a in
+       let y' = adjust_ptr locals y in
+       BLOCK (a', y', l)
+    | DECL (a, len, init_data, y, l) ->
+       let y' = adjust_ptr locals y in
+       DECL (a, len, init_data, y', l)
+    | RETURN (i, y, l) ->
+       let y' = adjust_ptr locals y in
+       RETURN (i, y', l)
+    | BREAK (y, l) ->
+       let y' = adjust_ptr locals y in
+       BREAK (y', l)
+    | CONTINUE (y, l) ->
+       let y' = adjust_ptr locals y in
+       CONTINUE (y', l)
+    | LABEL (lbl, el, y, l) ->
+       let y' = adjust_ptr locals y in
+       LABEL (lbl, el, y', l)
+  in
+  adjust_ptr [] p
+
+
+let adjust_calls aux_funcs p =
+  let module VR = Map.Make(String) in
+
+  let rec adjust_calls p =
+    match p with
+    | SKIP -> p
+    | FAIL -> p
+    | ASSIGN (a, b, y, l) ->
+       let y' = adjust_calls y in
+       ASSIGN (a, b,y',l)
+    | ASSERT (a, y, l) ->
+       let y' = adjust_calls  y in
+       ASSERT (a, y', l) 
+    | IF (a, b, c, y, l) ->
+       let b' = adjust_calls  b in
+       let c' = adjust_calls  c in
+       let y' = adjust_calls  y in
+       IF (a, b', c', y', l)
+    | WHILE (a, bs, b, c, y, l) ->
+       let b' = adjust_calls  b in
+       let y' = adjust_calls  y in
+       WHILE (a, bs, b', c, y', l)
+    | PROCCALL (z, a, b, i, y, l) ->
+       let y' = adjust_calls  y in
+       let sa, attr = E.decode (T.toExp a) in
+       if VR.mem sa aux_funcs then
+         let (fs_name, args, _) = VR.find sa aux_funcs in
+         let a' = _T @@ E.encode (fs_name, attr) in
+         PROCCALL (z, a', args, i, y', l)
+       else
+         PROCCALL (z, a, b, i, y', l)
+    | CONS (a, b, y, l) ->
+       let y' = adjust_calls  y in
+       CONS (a, b, y', l)
+    | MUTATION (a, b, c, y, l) ->
+       let y' = adjust_calls  y in
+       MUTATION (a, b, c, y', l)
+    | LOOKUP (a, b, c, y, l) ->
+       let y' = adjust_calls  y in
+       LOOKUP (a, b, c, y', l)
+    | DISPOSE (a, y, l) ->
+       let y' = adjust_calls  y in
+       DISPOSE (a, y', l)
+    | MALLOC (a, tl, y, l) ->
+       let y' = adjust_calls  y in
+       MALLOC (a, tl, y', l)
+    | SARRAY (a, b, tl, y, l) ->
+       let y' = adjust_calls  y in
+       SARRAY (a, b, tl, y', l)
+    | MAPS (a, b, y, l) ->
+       let y' = adjust_calls  y in
+       MAPS (a, b, y', l)
+    | PARALLEL (b, c, y, l) ->
+       let y' = adjust_calls  y in
+       PARALLEL (b, c, y', l)
+    | BLOCK (a, y, l) ->
+       let a' = adjust_calls  a in
+       let y' = adjust_calls  y in
+       BLOCK (a', y', l)
+    | DECL (a, len, init_data, y, l) ->
+       let y' = adjust_calls  y in
+       DECL (a, len, init_data, y', l)
+    | RETURN (i, y, l) ->
+       let y' = adjust_calls  y in
+       RETURN (i, y', l)
+    | BREAK (y, l) ->
+       let y' = adjust_calls  y in
+       BREAK (y', l)
+    | CONTINUE (y, l) ->
+       let y' = adjust_calls  y in
+       CONTINUE (y', l)
+    | LABEL (lbl, el, y, l) ->
+       let y' = adjust_calls  y in
+       LABEL (lbl, el, y', l)
+  in
+  adjust_calls p

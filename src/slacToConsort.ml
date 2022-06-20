@@ -93,7 +93,7 @@ let string_of_evar = function
          e -> F.pn v;
               raise e
      end
-  | e -> raise (NotSupported ("string_of_evar:" ^ E.toStr e))
+  | e -> raise (NotSupported ("string_of_evar:" ^ E.var_decode e))
 ;;
 
 let string_of_tvar = function
@@ -737,7 +737,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
   | MALLOC (a, size, y, l) ->
      let ptrs, declared, ry, y' = body_to_cexp gvars y in
      let s_size = exp_to_lhs ptrs vs size in
-     let ptrs' = S_E.filter (fun x->not (E.toStr x=E.toStr a)) ptrs in
+     let ptrs' = S_E.filter (fun x->not (E.var_decode x=E.var_decode a)) ptrs in
      (* let y', declared = fix_shadowing declared a y' in *)
      let p = C.Let (dp,
              Ast.PVar (string_of_evar a),
@@ -994,7 +994,7 @@ let slac_to_consort progs =
                 | G.PROC ((_,_,S.SKIP),_,_,_,_)
                   | G.PROC ((_,_,S.BLOCK (S.SKIP, S.SKIP, _)),_,_,_,_) ->
                    false
-                | G.PROC ((nm,_,_),_,_,_,_) when is_not_removable (E.toStr nm)  ->
+                | G.PROC ((nm,_,_),_,_,_,_) when is_not_removable (E.var_decode nm)  ->
                    true
                 | G.FFILE (_,nm) when is_not_removable nm  ->
                    true
