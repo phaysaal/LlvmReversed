@@ -58,12 +58,31 @@ let fresh_var () =
   fv
 ;;
 
+let is_not_removable nm =
+  match nm with
+    "assert"
+  | "abort"
+    | "malloc"
+    | "__VERIFIER_nondet_int"
+    | "__VERIFIER_assert"
+    | "__assert_fail"
+    (* | "reach_error" *)
+    | "llvm.stacksave"
+    | "llvm.stackrestore"
+    -> false
+  | _ -> true
+;;
+
+
 let is_a_ptr ?(arr_mode=false) ptrs vs = function
     E.VAR (s,attr) ->
      let b1 = S_E.exists (function E.VAR (sv,_) -> s=sv | _ -> false) ptrs in
      let b2 = List.mem E.PTR attr in
      let b3 = S_E.exists (function E.VAR (sv,attr') as v -> sv=s && E.is_ptr v  | _ -> false) vs in
-     (b1 || b2 || b3)
+     
+     let b = (b1 || b2 || b3) in
+     
+     b
   | _ -> false
 ;;
 
@@ -151,9 +170,13 @@ let rec exp_to_lhs ?(arg_mode=false) ?(arr_mode=false) ptrs vs e : C.lhs =
          C.(`OVar (corr_id s))
        else
          if is_a_ptr ptrs vs e then
-           C.(`ODeref (corr_id s))
+           begin
+             C.(`ODeref (corr_id s))
+           end
          else
-           C.(`OVar (corr_id s))
+           begin
+             C.(`OVar (corr_id s))
+           end
   | CONST (n) ->
      C.(`OInt n)
   | FLOAT (f) ->
@@ -230,6 +253,57 @@ let term_to_imm_op vs = function
        C.IVar s
   | _ -> raise (NotSupported "term_to_imm_op")
 ;;
+
+let read_tuple ptrs vs y' a b f =
+  (** let (_, a, _) = b in *)
+  let st_name = E.get_struct_name (T.toExp b) in
+  let (_, ls, _) = try List.find (fun (sn,_,_) -> sn=st_name) !structs with _ -> raise (Unexpected ("Not found struct " ^ st_name)) in
+  let sa = E.var_decode a in
+  let frv = fresh_var () in
+  let tp = List.map (fun (fld,_) -> if E.var_decode fld = f then Ast.PVar frv else Ast.PVar "_") ls in
+  let fld,_ = List.find (fun (fld,_) -> E.var_decode fld = f) ls in
+  let is_fld_struct = if E.is_struct fld then true else false in
+  let b' =
+    match term_to_lhs ptrs vs b with
+      C.(`ODeref _) as b' -> b'
+    | C.(`OVar s) -> C.(`ODeref s)
+    | _ -> raise (NotSupported "Read Tuple")
+  in
+  let decl, prog =
+    if is_fld_struct then
+      S_E.add a S_E.empty, C.Let (dp, Ast.PVar sa, C.(`OVar frv),y')
+    else
+      S_E.empty, C.Seq (ldp, C.Assign (dp, sa, C.(`OVar frv)),y')
+  in
+  
+  if List.length tp > 1 then
+    decl, C.Let (dp, Ast.PTuple tp, b', prog)
+  else
+    decl, C.Let (dp, List.hd tp, b', prog)
+;;
+
+let write_tuple ptrs vs y' a f b =
+(** let a = ref (0, 0) in
+    let (x, y) = *a in
+    a := (x, 100);
+    let (b, c) = *a in
+ *)
+  let st_name = E.get_struct_name (T.toExp a) in
+  let (_, ls, _) = try List.find (fun (sn,_,_) -> sn=st_name) !structs with _ ->
+                     raise (Unexpected ("Not found struct " ^ st_name)) in
+  if List.length ls > 1 then
+    let lhs, rhs = List.map (fun (fld,_) ->
+                       if E.var_decode fld = f then
+                         Ast.(PVar "_"), term_to_lhs ptrs vs b
+                       else
+                         let v = fresh_var () in
+                         Ast.(PVar v), C.(`OVar v)
+                     ) ls |> List.split in
+    let a' = term_to_lhs ptrs vs a in
+    C.Let (dp, Ast.PTuple lhs, a', C.Seq(ldp, C.Assign (dp, E.var_decode @@ T.toExp a, C.(`Tuple rhs)),y'))
+  else
+    C.Seq(ldp, C.Assign (dp, E.var_decode @@ T.toExp a, term_to_lhs ptrs vs b),y')
+;;
                            
 let bexp_to_relation vs = function
     B.UNIT (t1, op, t2) ->
@@ -260,11 +334,17 @@ let rec bexp_to_ifcond ptrs vs b : [ `Var of string | `BinOp of C.lhs * string *
      let l1' = to_lhs l1 in
      let l2  = bexp_to_ifcond ptrs vs b2 in
      let l2' = to_lhs l2 in
-     C.(`BinOp (l1', "/\\", l2'))
+     C.(`BinOp (l1', "&&", l2'))
   | B.OP (B.UNIT (a, V.Op.LE, b), V.Op.OR, B.UNIT (a', V.Op.EQ, b'))
     | B.OP (B.UNIT (a, V.Op.EQ, b), V.Op.OR, B.UNIT (a', V.Op.LE, b')) when a=a' && b=b' ->
      C.(`BinOp (term_to_lhs ptrs vs a, "<=", term_to_lhs ptrs vs b))
-  | _ ->
+    | B.OP (b1, V.Op.OR, b2) ->
+     let l1  = bexp_to_ifcond ptrs vs b1 in
+     let l1' = to_lhs l1 in
+     let l2  = bexp_to_ifcond ptrs vs b2 in
+     let l2' = to_lhs l2 in
+     C.(`BinOp (l1', "||", l2'))
+    | _ ->
      B.pprint b; F.pn "";
      raise (NotSupported "bexp_to_ifcond")
 ;;
@@ -413,9 +493,26 @@ let rec unshadow a t e =
   y, declared
 ;; *)
 
+let rec mk_empty_tuple st_name =
+  let (_, ls, _) = try List.find (fun (sn,_,_) -> sn=st_name) !structs with _ -> raise (Unexpected ("Not found struct " ^ st_name)) in
+  let ls' = List.map (fun (l,_) ->
+                if E.is_struct l then
+                  mk_empty_tuple (E.get_struct_name l)
+                else
+                  C.(`OInt 0)
+              ) ls in
+  if List.length ls' > 1 then
+    C.(`Mkref (`Tuple ls'))
+  else
+    C.(`Mkref (List.hd ls'))
+
+
+
 let rec declare_and_initialize declared' ptrs vs y a len init_data =
   if is_declared declared' a then
-    y
+    begin
+      y
+    end
   else 
     begin
       let rec init_data_to_patt a = function
@@ -432,6 +529,7 @@ let rec declare_and_initialize declared' ptrs vs y a len init_data =
            let ins' = List.map (init_data_to_tuple ptrs) ins in
            C.(`Tuple ins')
       in
+      E.pprint a; F.pn "";
       
       (* let y, declared =
         fix_shadowing declared' a y'
@@ -486,13 +584,48 @@ let rec declare_and_initialize declared' ptrs vs y a len init_data =
                 raise (Supported "declare and initialize (mistake perhaps)")
            end
         | true, false -> (** TODO: Double Check *)
-           if E.is_ptr a then
+           begin
+             match init_data with
+               S.INIT_E ->
+                (* if E.is_ptr a then
+                  y
+                else *)
+                  C.Let (dp,
+                       init_data_to_patt (string_of_evar a) init_data,
+                       mk_empty_tuple (E.get_struct_name a),
+                       y
+               )
+             | S.INIT_S src when E.is_struct @@ T.toExp src ->
+                let src_name = E.get_struct_name @@ T.toExp src in
+                let dest_name = E.get_struct_name a in
+                if dest_name <> src_name then 
+                  let (_, flds, _) = List.find (fun (a, _, _) -> a=src_name) !structs in
+                  let lhs_dest = List.map (fun (fld,_) ->
+                                    if E.is_struct fld && E.get_struct_name fld = dest_name then
+                                      Ast.PVar (string_of_evar a)
+                                    else
+                                      Ast.PVar "_"
+                                  ) flds in
+                  C.Let (dp,
+                         Ast.PTuple lhs_dest,
+                         C.(`ODeref (string_of_evar @@ T.toExp src)),
+                         (* term_to_lhs ptrs vs src, *)
+                         y
+                    )
+                else
+                  C.Let (dp,
+                    init_data_to_patt (string_of_evar a) init_data,
+                    init_data_to_tuple ptrs init_data,
+                    y
+               )
+             | _ ->
+           (* if E.is_ptr a then *)
              C.Let (dp,
                     init_data_to_patt (string_of_evar a) init_data,
                     init_data_to_tuple ptrs init_data,
                     y
                )
-           else
+           (* else
              let st_name = E.get_struct_name a in
              let (_, fields,_) = List.find (fun (sn,_,_) -> sn=st_name) !structs in
              
@@ -500,7 +633,8 @@ let rec declare_and_initialize declared' ptrs vs y a len init_data =
                   Ast.PVar (string_of_evar a),
                   C.(`MkArray (exp_to_lhs ptrs vs @@ (E.CONST (List.length fields)))),
                   y
-             )
+             ) *)
+           end
         | false, true -> (** TODO: Multidimentional array support *)
            C.Let (dp,
                   Ast.PVar (string_of_evar a),
@@ -557,35 +691,85 @@ let to_simple ptrs vs l =
   | _ ->
      let f = fresh_var () in
      T.EXP (E.VAR (f,[])), [(f, C.(`OVar (string_of_tvar l)))]
-    
-       
-let mk_assert ptrs vs y b =
-  match b with
-    B.UNIT (l, op, r) ->
-     let l', pr1 = to_simple ptrs vs l in
-     let r', pr2 = to_simple ptrs vs r in
-     let pr : (string * C.lhs) list = pr1@pr2 in
-     let cnd = C.{rop1= term_to_imm_op vs l';cond=string_of_op op; rop2= term_to_imm_op vs r'} in
-     let prog =  C.Seq (ldp,
-             C.Assert (dp, cnd),
-             y) in
-     let all_prog = List.fold_left (fun prog (l,r) -> C.Let (dp, Ast.PVar l, r, prog)) prog pr in
-     all_prog
-  | B.OP (B.UNIT (l,V.Op.LE,r), V.Op.OR, B.UNIT (l1,V.Op.EQ,r1)) when l=l1 && r=r1 ->
-     let l', pr1 = to_simple ptrs vs l in
-     let r', pr2 = to_simple ptrs vs r in
-     let pr : (string * C.lhs) list = pr1@pr2 in
-     let cnd = C.{rop1= term_to_imm_op vs l';cond="<="; rop2= term_to_imm_op vs r'} in
-     let prog =  C.Seq (ldp,
-             C.Assert (dp, cnd),
-             y) in
-     let all_prog = List.fold_left (fun prog (l,r) -> C.Let (dp, Ast.PVar l, r, prog)) prog pr in
-     all_prog
-  | B.OP (l, op, r) ->
-     F.dbgf "SC" "%a" B.fstr b;
-     raise (NotSupported " yet")
-  | _ ->
-     raise (NotSupported " and never will")
+
+     (*
+let rec mk_assert ptrs vs y b =
+  let rec mk_assert b =
+    match b with
+      B.UNIT (l, op, r) ->
+       let l', pr1 = to_simple ptrs vs l in
+       let r', pr2 = to_simple ptrs vs r in
+       let pr : (string * C.lhs) list = pr1@pr2 in
+       let cnd = C.{rop1= term_to_imm_op vs l';cond=string_of_op op; rop2= term_to_imm_op vs r'} in
+       let prog =  C.Assert (dp, cnd) in
+       pr, prog
+    | B.OP (B.UNIT (l,V.Op.LE,r), V.Op.OR, B.UNIT (l1,V.Op.EQ,r1)) when l=l1 && r=r1 ->
+       let l', pr1 = to_simple ptrs vs l in
+       let r', pr2 = to_simple ptrs vs r in
+       let pr : (string * C.lhs) list = pr1@pr2 in
+       let cnd = C.{rop1= term_to_imm_op vs l';cond="<="; rop2= term_to_imm_op vs r'} in
+       pr, C.Assert (dp, cnd)
+    | B.OP (l, V.Op.AND, r) ->
+       let pr1, p1 = mk_assert l in 
+       let pr2, p2 = mk_assert r in
+       pr1@pr2, C.Seq (ldp, p1, p2)
+    | B.OP _ ->
+       F.dbgf "SC" "%a" B.fstr b;
+       raise (NotSupported " yet")
+    | _ ->
+       raise (NotSupported " and never will")
+  in
+  let pr, p = mk_assert b in
+
+  let prog =  C.Seq (ldp,
+                     p,
+                     y) in
+  let all_prog = List.fold_left (fun prog (l,r) -> C.Let (dp, Ast.PVar l, r, prog)) prog pr in
+  prog
+;;
+      *)
+     
+let rec mk_assert ptrs vs y b =
+  let lhs_b = bexp_to_ifcond ptrs vs b in
+  let true_rel = C.{rop1=IInt 0;cond="="; rop2= IInt 0} in
+  let false_rel = C.{rop1=IInt 0;cond="="; rop2= IInt 1} in
+        
+  C.Cond (dp, lhs_b,
+          C.Seq (ldp, C.Assert (dp, true_rel), y),
+          C.Seq (ldp, C.Assert (dp, false_rel), y))
+  (*
+  let rec mk_assert b =
+    match b with
+      B.UNIT (l, op, r) ->
+       let l', pr1 = to_simple ptrs vs l in
+       let r', pr2 = to_simple ptrs vs r in
+       let pr : (string * C.lhs) list = pr1@pr2 in
+       let cnd = C.{rop1= term_to_imm_op vs l';cond=string_of_op op; rop2= term_to_imm_op vs r'} in
+       let prog =  C.Assert (dp, cnd) in
+       pr, prog
+    | B.OP (B.UNIT (l,V.Op.LE,r), V.Op.OR, B.UNIT (l1,V.Op.EQ,r1)) when l=l1 && r=r1 ->
+       let l', pr1 = to_simple ptrs vs l in
+       let r', pr2 = to_simple ptrs vs r in
+       let pr : (string * C.lhs) list = pr1@pr2 in
+       let cnd = C.{rop1= term_to_imm_op vs l';cond="<="; rop2= term_to_imm_op vs r'} in
+       pr, C.Assert (dp, cnd)
+    | B.OP (l, V.Op.AND, r) ->
+       let pr1, p1 = mk_assert l in 
+       let pr2, p2 = mk_assert r in
+       pr1@pr2, C.Seq (ldp, p1, p2)
+    | B.OP _ ->
+       F.dbgf "SC" "%a" B.fstr b;
+       raise (NotSupported " yet")
+    | _ ->
+       raise (NotSupported " and never will")
+  in
+  let pr, p = mk_assert b in
+
+  let prog =  C.Seq (ldp,
+                     p,
+                     y) in
+  let all_prog = List.fold_left (fun prog (l,r) -> C.Let (dp, Ast.PVar l, r, prog)) prog pr in
+  prog *)
 ;;
 
 let print_vars b vs =
@@ -612,6 +796,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      let sa = try string_of_evar a with e -> F.dbgf "SC" "Exception in Assing"; raise e in
      let lb = term_to_lhs ptrs vs b in
      let ptrs' = enptr a ptrs in
+     
      let p = C.Seq (ldp, C.Assign (dp, sa, lb), y') in
      (ptrs',
       declared,
@@ -694,6 +879,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
               y, _) ->
      S_E.empty, S_E.empty, [], C.Assert (dp, bexp_to_relation vs (B.UNIT(T.zero, V.Op.NE, T.zero)))
   | PROCCALL (z, a, b, i, y, l) ->
+     
      let addrs' = (List.map T.toExp b)
                   |> S_E.of_list
                   |> S_E.filter (function E.ADDR _ -> true | _ -> false) 
@@ -711,7 +897,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      let gvs = try DM.find (string_of_tvar a) dep_map with _ -> S_E.empty in
      let lgvs = to_list gvs in
      let lhs_gvs = List.map (exp_to_lhs ~arg_mode:true ptrs vs) lgvs in
-     let (_, params, _) = List.find (fun (pn,_,_) -> pn=T.toExp a) !procedures in
+     let (_, params, _) = try List.find (fun (pn,_,_) -> pn=T.toExp a) !procedures with e -> F.pn ("Not found function: " ^ T.toStr a); raise e in
      let vparams = List.map var_of_assignee params in
      
      let par_arg = List.combine b vparams in
@@ -735,19 +921,44 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
       ry,
       p)
   | MALLOC (a, size, y, l) ->
-     let ptrs, declared, ry, y' = body_to_cexp gvars y in
-     let s_size = exp_to_lhs ptrs vs size in
-     let ptrs' = S_E.filter (fun x->not (E.var_decode x=E.var_decode a)) ptrs in
-     (* let y', declared = fix_shadowing declared a y' in *)
-     let p = C.Let (dp,
-             Ast.PVar (string_of_evar a),
-             C.(`MkArray (s_size)),
-             y') in
-     (ptrs',
-      S_E.add a declared,
-      ry,
-      p
-     )   
+     if E.is_array a then
+       begin
+         let ptrs, declared, ry, y' = body_to_cexp gvars y in
+         let s_size = exp_to_lhs ptrs vs size in
+         let ptrs' = S_E.filter (fun x->not (E.var_decode x=E.var_decode a)) ptrs in
+         (* let y', declared = fix_shadowing declared a y' in *)
+         let p = C.Let (dp,
+                        Ast.PVar (string_of_evar a),
+                        C.(`MkArray (s_size)),
+                        y') in
+         (ptrs',
+          S_E.add a declared,
+          ry,
+          p
+         )
+       end
+     else if E.is_struct a then
+       
+         begin
+         let st_name = E.get_struct_name a in
+         let tp = mk_empty_tuple st_name in
+         let ptrs, declared, ry, y' = body_to_cexp gvars y in
+         let ptrs' = S_E.filter (fun x->not (E.var_decode x=E.var_decode a)) ptrs in
+         (* let y', declared = fix_shadowing declared a y' in *)
+         let p = C.Let (dp,
+                        Ast.PVar (string_of_evar a),
+                        tp,
+                        y') in
+         (ptrs',
+          S_E.add a declared,
+          ry,
+          p
+         )
+       end
+     else
+       begin
+         raise (NotSupported "Malloc")
+       end
   | MUTATION (a, b, c, y, l) ->
      let ptrs1, declared, ry, y' = body_to_cexp gvars y in
      let (pt, ind) = de_add a in
@@ -758,66 +969,74 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
          if E.is_struct pt then
            raise (Supported "Mutation")
          else
-           C.Update (dp,
-                     exp_to_lhs ~arr_mode:true ptrs vs pt,
-                     exp_to_lhs ptrs vs ind,
-                     term_to_lhs ptrs vs c)
+           let prog = C.Update (dp,
+                                exp_to_lhs ~arr_mode:true ptrs vs pt,
+                                exp_to_lhs ptrs vs ind,
+                                term_to_lhs ptrs vs c) in
+           C.Seq(ldp,
+              prog,
+              y')
        else
          if E.is_struct pt then (** pt->fld = exp; --> pt := () *)
-           C.Update (dp,
+           write_tuple ptrs vs y' a b c
+           (* C.Update (dp,
                      term_to_lhs ~arr_mode:true ptrs vs a,
                      exp_to_lhs ptrs vs (E.CONST (int_of_string b)),
-                     term_to_lhs ptrs vs c)
+                     term_to_lhs ptrs vs c) *)
          else
            if ind = E.CONST 0 then
-             C.Assign (dp,
+             let prog = C.Assign (dp,
                        string_of_evar pt,
                        term_to_lhs ptrs vs c
-               )
+                          ) in
+             C.Seq(ldp,
+              prog,
+              y')
            else
-             C.Update (dp,
+             let prog = C.Update (dp,
                        exp_to_lhs S_E.empty S_E.empty pt,
                        exp_to_lhs ptrs vs ind,
-                       term_to_lhs ptrs vs c)
+                       term_to_lhs ptrs vs c) in
+             C.Seq(ldp,
+              prog,
+              y')
      in
      (* if b = "*" then *)
        (ptrs,
         declared,
         ry,
-        C.Seq(ldp,
-              prog,
-              y')
+        prog
        )
      (* else
        raise (Supported "Mutation") *)
   | LOOKUP (a, b, c, y, l) ->
-     let vs' = enptr a vs in
-     let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs') y in
      let (pt, ind) = de_add b in
-     (* let y', declared = fix_shadowing declared a y' in *)
-     let rhs =
+     let vs' =  (* if E.is_struct pt then vs else *) enptr a vs in
+     let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs') y in
+     let decl, prog =
        if E.is_array pt then
          if E.is_struct pt then
            raise (Supported "Mutation")
          else
-           C.(`Read (exp_to_lhs ~arr_mode:true ptrs vs pt, exp_to_lhs ptrs vs ind))
+           let rhs = C.(`Read (exp_to_lhs ~arr_mode:true ptrs vs pt, exp_to_lhs ptrs vs ind)) in
+           S_E.empty, C.Seq (ldp, C.Assign (dp, string_of_evar a, rhs), y')
        else
          if E.is_struct pt then
-           C.(`Read (term_to_lhs ~arr_mode:true ptrs vs b, exp_to_lhs ptrs vs (E.CONST (int_of_string c))))
+           read_tuple ptrs vs y' a b c
          else
            if ind = E.CONST 0 then
-             C.(`ODeref (string_of_evar pt))
+             let rhs = C.(`ODeref (string_of_evar pt)) in
+             S_E.empty, C.Seq (ldp, C.Assign (dp, string_of_evar a, rhs), y')
            else
-             C.(`Read (exp_to_lhs S_E.empty S_E.empty pt, exp_to_lhs ptrs vs ind))
+             let rhs = C.(`Read (exp_to_lhs S_E.empty S_E.empty pt, exp_to_lhs ptrs vs ind)) in
+             S_E.empty, C.Seq (ldp, C.Assign (dp, string_of_evar a, rhs), y')
      in
-     (* if c = "*" then *)
-       (S_E.add a ptrs,
-        declared,
-        ry,
-        C.Seq (ldp, C.Assign (dp, string_of_evar a, rhs), y')
-       )
-     (* else
-       raise (Supported "Lookup") *)
+     
+     (S_E.add a ptrs,
+      S_E.union decl declared,
+      ry,
+      prog
+     )
   | BLOCK (a, y, l) ->
      let ptrs1, declared, ra, a' = body_to_cexp gvars a in
      begin
@@ -931,20 +1150,6 @@ let rec slacC_to_prog dep_map acc = function
   | _::xs -> slacC_to_prog dep_map acc xs
 ;;
 
-let is_not_removable nm =
-  match nm with
-    "assert"
-  | "abort"
-    | "malloc"
-    | "__VERIFIER_nondet_int"
-    | "__VERIFIER_assert"
-    | "__assert_fail"
-    | "reach_error"
-    | "llvm.stacksave"
-    | "llvm.stackrestore"
-    -> false
-  | _ -> true
-;;
 
 let rec get_func_global_dep_fn progs dep_map fn body =
   let sfn = string_of_evar fn in
@@ -1018,6 +1223,7 @@ let slac_to_consort progs =
                          | _ -> acc
       ) [] funs in
   procedures := procs;
+  
   let dep_map = get_func_global_dep procs DM.empty procs in
   let fns = slacC_to_prog dep_map [] funs in
   let is_main_exists = List.exists (function ("main",_,_) -> true | _ -> false) fns in
@@ -1053,8 +1259,9 @@ let print_consort consort fname progs =
       ConsortAstPrinter.pretty_print_program ic (fns, body);
       F.pn ("ConSORT output is written to " ^ fname');
       F.pn ("... will be verified by " ^ consort);
-      let s = Sys.command (consort ^ " " ^ fname') in
-      if s = 0 then
+      let s1 = Sys.command (consort ^ " " ^ fname') in
+      let s2 = Sys.command (consort ^ " -exec interp " ^ fname') in
+      if s1 = 0 && s2 = 0 then
         F.pn ("Verification finished.")
       else
         F.pn ("Verification failed.")

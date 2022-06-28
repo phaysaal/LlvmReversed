@@ -655,11 +655,23 @@ let restore_prog structures p =
     | ASSERT (a, y, l) ->
        let r, y' = restore_prog locals y in
        addfv r (F.fv (List.hd a)),  ASSERT (a, y', l)
+    | DECL (x, d1, d2,
+            IF (a,
+                (ASSIGN(x1, T.EXP (E.CONST 1),SKIP,_) as p1),
+                (ASSIGN(x2, T.EXP (E.CONST 0),SKIP,_) as p2),
+                y, l),d3) when x1=x2 && x=x1 ->
+       let (r, s), y' = restore_prog locals y in
+       
+       if E.is_global x1 || E.is_param x1 || S.mem x1 s then
+         let s' = S.add x s in
+         (r, addfvs s' (B.fv a)), DECL (x, d1, d2, IF (a, p1, p2, y', l), d3)
+       else
+         (r,s), y'
     | IF (a, b, c, y, l) ->
        (* let nn = !noop in
        noop := true; *)
-       let (r1, s1), b' = restore_prog locals b in
-       let (r2, s2), c' = restore_prog locals c in
+       let (r1, s1), b' = restore_prog [] b in
+       let (r2, s2), c' = restore_prog [] c in
        let (r3, s3), y' = restore_prog locals y in
        (* noop := nn; *)
        let r = S.union (S.union r1 r2) r3 in
@@ -668,7 +680,7 @@ let restore_prog structures p =
     | WHILE (a, bs, b, c, y, l) ->
        let nn = !noop in
        noop := true;
-       let (r1, s1), b' = restore_prog locals b in
+       let (r1, s1), b' = restore_prog [] b in
        let (r3, s3), y' = restore_prog locals y in
        noop := nn;
        let r = S.union r1 r3 in
@@ -676,15 +688,16 @@ let restore_prog structures p =
        (r, addfvs s (B.fv a)), WHILE (a, bs, b', c, y', l)
     | PROCCALL (z, a, b, i, y, l) ->
        let (r,s), y' = restore_prog locals y in
+       let fv_b = List.concat (List.map T.fv b) in
        begin
          match z with
            None ->
-            (r, addfvs s (List.concat (List.map T.fv b))), PROCCALL (z, a, b, i, y', l)
+            (r, addfvs s fv_b), PROCCALL (z, a, b, i, y', l)
          | Some z' ->
             if !noop || (* E.is_global z' || E.is_param z' || *) not (List.mem z' locals) || S.mem z' s then
-              (r, addfvs s (z'::List.concat (List.map T.fv b))), PROCCALL (z, a, b, i, y', l)
+              (r, addfvs s (z'::fv_b)), PROCCALL (z, a, b, i, y', l)
             else
-              (r, addfvs s (List.concat (List.map T.fv b))), PROCCALL (None, a, b, i, y', l)
+              (r, addfvs s fv_b), PROCCALL (None, a, b, i, y', l)
        end
     | CONS (a, b, y, l) ->
        let r, y' = restore_prog locals y in
@@ -714,6 +727,7 @@ let restore_prog structures p =
     | PARALLEL (b, c, y, l) ->
        let r, y' = restore_prog locals y in
        r, PARALLEL (b, c, y', l)
+    | BLOCK (BLOCK (a, SKIP, l), y, _)
     | BLOCK (a, y, l) ->
        let (r1,s1), a' = restore_prog [] a in
        let (r2,s2), y' = restore_prog locals y in
@@ -746,9 +760,9 @@ let restore_prog structures p =
                   match tl with
                     E.CONST n ->
                      let m = E._struct_size structures p in
-                    let z = E.CONST (n/m) in
-                    let snm = E.get_struct_name p in
-                    E.BINOP (E.SIZEOF snm, Op.MUL, z)
+                     let z = E.CONST (n/m) in
+                     let snm = E.get_struct_name p in
+                     E.BINOP (E.SIZEOF snm, Op.MUL, z)
                   | _ ->
                      tl
                 else
@@ -756,21 +770,21 @@ let restore_prog structures p =
               in
               restore_prog locals (MALLOC (p, tl, y, l))
            | IF (b,
-                        ASSIGN (c1, T.EXP(E.CONST 1), SKIP, _),
-                        ASSIGN (c2, T.EXP(E.CONST 0), SKIP, _),
-                        DECL (cv'', _, INIT_E,
-                              ASSIGN (cv', cp,
-                                      ASSERT ([(_,[B.UNIT (cv, Op.NE, T.EXP (E.CONST 0))],[],[])],
-                                              y,_),_), _),
-                        _) when T.toExp cv=cv' && T.toExp cp=a && a=c1 && a=c2 && is_not_in y ->
-                     restore_prog locals (ASSERT ([([],[b],[],[])],y,l))
-                  | LOOKUP (a1, pt, fld,
-                            ASSIGN (c, a2, y, _), _) when a=a1 && a=T.toExp a2 && is_not_in y ->
-                     restore_prog locals (LOOKUP (c, pt, fld, y, l))
-                  | _ ->
-                     deal_decl ()
-                else
-                  deal_decl ()
+                 ASSIGN (c1, T.EXP(E.CONST 1), SKIP, _),
+                 ASSIGN (c2, T.EXP(E.CONST 0), SKIP, _),
+                 DECL (cv'', _, INIT_E,
+                       ASSIGN (cv', cp,
+                               ASSERT ([(_,[B.UNIT (cv, Op.NE, T.EXP (E.CONST 0))],[],[])],
+                                       y,_),_), _),
+                 _) when T.toExp cv=cv' && T.toExp cp=a && a=c1 && a=c2 && is_not_in y ->
+              restore_prog locals (ASSERT ([([],[b],[],[])],y,l))
+           | LOOKUP (a1, pt, fld,
+                     ASSIGN (c, a2, y, _), _) when a=a1 && a=T.toExp a2 && is_not_in y ->
+              restore_prog locals (LOOKUP (c, pt, fld, y, l))
+           | _ ->
+              deal_decl ()
+         else
+           deal_decl ()
        end
     | RETURN (i, y, l) ->
        let r, y' = restore_prog locals y in
@@ -917,14 +931,17 @@ let adjust_calls aux_funcs p =
        let y' = adjust_calls  y in
        WHILE (a, bs, b', c, y', l)
     | PROCCALL (z, a, b, i, y, l) ->
-       let y' = adjust_calls  y in
-       let sa, attr = E.decode (T.toExp a) in
-       if VR.mem sa aux_funcs then
-         let (fs_name, args, _) = VR.find sa aux_funcs in
-         let a' = _T @@ E.encode (fs_name, attr) in
-         PROCCALL (z, a', args, i, y', l)
-       else
-         PROCCALL (z, a, b, i, y', l)
+       begin
+         let y' = adjust_calls  y in
+         try
+           let sa, attr = E.decode (T.toExp a) in
+           let (fs_name, args, _) = List.find (fun (a',_,_) -> a'=sa) aux_funcs in
+           let a' = _T @@ E.encode (fs_name, attr) in
+           PROCCALL (z, a', args, i, y', l)
+         with
+           Not_found ->
+        PROCCALL (z, a, b, i, y', l)
+       end
     | CONS (a, b, y, l) ->
        let y' = adjust_calls  y in
        CONS (a, b, y', l)

@@ -20,5 +20,5 @@ int main(){
     b->set(p);
     q = b->get();
     assert(p==q);
-    return 0;
+    return q;
 }

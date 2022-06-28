@@ -43,6 +43,7 @@ int main(){
 	assert(n == 5);
 	assert(m == 1);
 	assert(q == 2);
+	return n+m+q;
 }
 
 

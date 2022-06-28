@@ -4,7 +4,15 @@ module E = V.Exp
 module LT = L.TypeKind
 module F = Ftools
 module P = Print
-          
+
+let get_struct_name ty =
+  let stn =
+    match L.struct_name ty with
+      Some s -> (F.corr_structname s)
+    | None -> ""
+  in
+  stn
+  
 let rec get_types ty =
   let tp = L.classify_type ty in
   F.dbgf "VAR" "Type: %s" (P.string_of_type ty);
@@ -25,11 +33,7 @@ let rec get_types ty =
   |	Ppc_fp128 -> [E.SIMPLE 16]
   |	Label -> []
   |	Struct ->
-     let stn =
-       match L.struct_name ty with
-         Some s -> (F.corr_structname s)
-       | None -> ""
-     in
+     let stn = get_struct_name ty in
      [E.STRUCT stn] (* @ get_types @@ L.element_type ty *)
   |	Array ->
      let sz = L.array_length ty in

@@ -74,7 +74,7 @@ let rec pp_lhs (l:lhs) =
       ]
   | `BinOp (l1, op, l2) ->
      pl [
-         pf "%a %s %a" (ul pp_lhs) l1 op (ul pp_lhs) l2
+         pf "(%a %s %a)" (ul pp_lhs) l1 op (ul pp_lhs) l2
        ]
   | `Null -> ps "null"
   | `OBool b -> if b then ps "True" else ps "False"

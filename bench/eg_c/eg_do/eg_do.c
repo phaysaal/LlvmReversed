@@ -166,18 +166,18 @@ int main(){
 	a3 = g1();
 	a4 = g2();
 	a5 = h();
-	a6 = h1();
-	a7 = h2();
-	a8 = gh();
-	a9 = gh1();
+	//a6 = h1();
+	//a7 = h2();
+	//a8 = gh();
+	//a9 = gh1();
 
 	assert(a1==10);
 	assert(a2==8);
 	assert(a3==11);
 	assert(a4==1);
 	assert(a5==11);
-	assert(a6==11);
-	assert(a7==83);
+	//assert(a6==11);
+	//assert(a7==83);
 	//assert(a8==173);
 	//assert(a9==7);
 	return 0;

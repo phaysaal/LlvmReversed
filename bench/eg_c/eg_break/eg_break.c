@@ -42,5 +42,5 @@ int main(){
 	int u = h(x, y); // 0
 
 	assert(z==w+u+1);
-	return 0;
+	return z;
 }

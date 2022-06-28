@@ -16,5 +16,5 @@ int main(){
     D dobj(109);
     int q = dobj.getD();
     assert(q == 109);
-    return 0;
+    return q;
 }

@@ -31,6 +31,6 @@ int main() {
    // volume of box 2
    volume = Box2.height * Box2.length * Box2.breadth;
    assert(volume == 240.0);
-   return 0;
+   return (int)volume;
 }
 

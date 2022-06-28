@@ -29,5 +29,5 @@ int main(){
     c.setD(10);
     int q = c.getD();
     assert(q == 10);
-    return 0;
+    return q;
 }

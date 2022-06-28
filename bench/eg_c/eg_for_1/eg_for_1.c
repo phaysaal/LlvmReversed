@@ -1,7 +1,7 @@
 #include<assert.h>
 
 int f0(){
-	int x = 200;
+	int x = 10;
 	int i;
 	for(i=0;i<x;i++){
 		x--;
@@ -12,6 +12,6 @@ int f0(){
 int main() {
 	int a;
 	a = f0();
-	assert (a==50);
-	return 0;
+	assert (a==5);
+	return a;
 }

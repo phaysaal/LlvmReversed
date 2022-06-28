@@ -17,5 +17,5 @@ int main(){
     a.set(p);
     q = a.get();
     assert(p==q);
-    return 0;
+    return q;
 }

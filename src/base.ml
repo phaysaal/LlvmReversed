@@ -1142,8 +1142,8 @@ module Exp = struct
     | "int" -> 4
     | "long" -> 8
     | "int64" -> 8
-    | "float" -> 4
-    | "double" -> 8
+    | "float" -> 5
+    | "double" -> 9
     | "sizet" -> 2
     | x -> raise (StError ("Unknown simple type " ^ x))
 

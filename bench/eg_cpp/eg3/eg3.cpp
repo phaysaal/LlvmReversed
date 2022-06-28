@@ -25,5 +25,5 @@ int main(){
     b->y = 10;
     q = b->y;
     assert(q==10);
-    return 0;
+    return q;
 }
