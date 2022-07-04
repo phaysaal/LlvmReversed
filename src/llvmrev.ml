@@ -18,6 +18,8 @@ let compacted_dir = ref "";;
 let transformed_dir = ref "";;
 let trans_dir = ref "";;
 let filesn = ref 0;;
+let bc_mode = ref false;;
+let bc_file = ref "";;
 
 let checkdir s =
   let _ = Sys.command ("mkdir " ^ s) in
@@ -27,8 +29,29 @@ let checkdir s =
 let manage_dirs () =
   let endslash s = String.sub s (String.length s - 1) 1 = "/" in
   let ifslash s = if endslash s then String.sub s 0 (String.length s - 1) ^ "_LlvmRev/" else s ^ "_LlvmRev/" in
+
+  let fdir = ref "" in
+  let parent_dir_name s =
+    let ss = String.split_on_char (String.get Filename.dir_sep 0) s in
+    let ss' = ss |> List.rev in
+    match ss' with
+      fname::dirs ->
+      let ss' = dirs |> List.rev |> String.concat Filename.dir_sep in
+      fdir := String.sub fname 0 (String.length fname - 3);
+      bc_file := fname;
+      ss'
+    | _ -> raise (Err "Invalid filename")
+  in
   
-  root_dir := Sys.argv.(1);
+  let arg1 = Sys.argv.(1) in
+  bc_mode := arg1 = "-bc";
+
+  if !bc_mode then
+    bc_file := Sys.argv.(2);
+  
+  let s = if !bc_mode then parent_dir_name !bc_file else Sys.argv.(1) in
+  
+  root_dir := s;
   let lr_dir = ifslash !root_dir in
   let slac_dir = lr_dir ^ "SlacData/" in
   
@@ -37,6 +60,7 @@ let manage_dirs () =
       let _ = Sys.command ("rm -r " ^ lr_dir) in
       ()
     end;
+
   comp_dir := slac_dir ^ "LLVM/";
   trans_dir := slac_dir ^ "Translated/";
   T.func_dir := !trans_dir ^ "func/";
@@ -50,6 +74,15 @@ let manage_dirs () =
   checkdir !T.func_dir;
   checkdir !compacted_dir;
   checkdir !transformed_dir;
+
+  if !bc_mode then
+    begin
+      let str = "cp " ^ !root_dir ^ Filename.dir_sep ^ !bc_file ^ " " ^ !comp_dir ^ Filename.dir_sep ^ !bc_file in
+      F.pn str;
+      let _ = Sys.command ( str ) in
+      ()
+    end;
+ 
   ()
 ;;
 
@@ -100,7 +133,15 @@ let get_all_C_files curdir =
 ;;
 
 let compile () =
-  get_all_C_files !root_dir 
+  if !bc_mode then
+    begin
+      (* F.pn !bc_file; *)
+      [!bc_file]
+    end
+  else
+    begin
+      get_all_C_files !root_dir
+    end
 ;;
 
 let write_file i filename fullpath globals structures =
@@ -155,7 +196,7 @@ let _ =
     manage_dirs ();
     configure ();
     let llvm_files = compile () in
-    T.pf "Compilation to LLVM is finished\n";
+    
     let gs = translate llvm_files in
     T.pf "Translation to SLAC C is finished\n";
 
