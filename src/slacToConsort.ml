@@ -1193,7 +1193,7 @@ let rec get_func_global_dep progs dep_map = function
 
 let slac_to_consort progs =
   structs := List.fold_left (fun acc -> (function G.STRUCT (a,_) -> a::acc | _ -> acc)) [] progs;
-  List.iter Structure.pprint !structs;
+  
   let funs = List.filter
                (function
                 | G.PROC ((_,_,S.SKIP),_,_,_,_)

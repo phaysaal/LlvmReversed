@@ -259,16 +259,25 @@ let null = T.NULL ;;
 let _T e = T.EXP e ;;
 
 let corr_id v =
+  let mx = 150 in
   let v' =
     if String.contains v '.' then
       String.map (function '.' -> '_' | '$' -> '_' | c -> c) v
     else
       v
   in
-  if String.length v' > 1 && String.get v' 0 = '@' then
-    "GLOBAL__" ^ String.sub v' 1 (String.length v' - 1)
-  else
-    v'
+  let v'' =
+    if String.length v' > 1 && String.get v' 0 = '@' then
+      "GLOBAL__" ^ String.sub v' 1 (String.length v' - 1)
+    else
+      v' in
+  let v'3 =
+    if String.length v'' > mx then
+      String.sub v'' (String.length v''-mx) mx
+    else
+      v''
+  in
+  v'3
 ;;
 
 let var x attr = E.VAR (corr_id x, attr) ;;
@@ -727,7 +736,7 @@ let restore_prog structures p =
     | PARALLEL (b, c, y, l) ->
        let r, y' = restore_prog locals y in
        r, PARALLEL (b, c, y', l)
-    | BLOCK (BLOCK (a, SKIP, l), y, _)
+    (* | BLOCK (BLOCK (a, SKIP, l), y, _) *)
     | BLOCK (a, y, l) ->
        let (r1,s1), a' = restore_prog [] a in
        let (r2,s2), y' = restore_prog locals y in
