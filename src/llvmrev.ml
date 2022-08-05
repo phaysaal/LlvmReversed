@@ -84,38 +84,46 @@ let manage_dirs () =
 let parse_args () =
   let l = Array.length Sys.argv in
   let rec aux i =
-    if i < l-1 then
+    if i < l then
       let d = Array.get Sys.argv i in
       match d with
-        "-d" ->
-         let sdeb = Array.get Sys.argv (i+1) in
-         let debs = String.split_on_char ',' sdeb in
-         F.p_opt := debs;
-         aux (i+2)
-      | "-bc" ->
-         bc_file := Array.get Sys.argv (i+1);
-         bc_mode := true; 
-         aux (i+2)
-      | "-f" ->
-         T.one_func := Array.get Sys.argv (i+1);
-         aux (i+2)
-      | _ ->
+      | "-np" ->
+         T.non_pattern := true;
          aux (i+1)
+      | _ -> 
+         if i < l-1 then  
+           match d with
+             "-d" ->
+              let sdeb = Array.get Sys.argv (i+1) in
+              let debs = String.split_on_char ',' sdeb in
+              F.p_opt := debs;
+              aux (i+2)
+           | "-bc" ->
+              bc_file := Array.get Sys.argv (i+1);
+              bc_mode := true; 
+              aux (i+2)
+           | "-f" ->
+              T.one_func := Array.get Sys.argv (i+1);
+              aux (i+2)
+           | _ ->
+              aux (i+1)
+         else
+           ()
     else
       ()
   in
   aux 1
 
 let compile_a_cpp_file (path, file) =
-  let extra =
+  (* let extra =
     let rec aux i =
       if i < Array.length Sys.argv then
         Sys.argv.(i) ^ " " ^ (aux (i+1))
       else
         ""
     in
-    aux 2 in 
-  let str_cmd = "clang -fno-discard-value-names -emit-llvm " ^ extra ^ " -o " ^ !comp_dir ^ file ^ ".bc -c " ^ path in
+    aux 2 in *) 
+  let str_cmd = "clang -fno-discard-value-names -emit-llvm -o " ^ !comp_dir ^ file ^ ".bc -c " ^ path in
   T.pf "%s\n" str_cmd;
   let r = Sys.command str_cmd in
   if r = 0 then
@@ -169,6 +177,7 @@ let write_file i filename fullpath globals structures =
   let ffile = !trans_dir ^ "/" ^ flattenpath in
   let module_id = i in
   let _Fmod : t = (filename, fullpath, globals, structures, false, V.Formula.empty, VV.empty) in
+  F.pn ""; F.pn ffile;
   F.write_file ffile (module_id, _Fmod);
 ;;
 
@@ -230,3 +239,4 @@ let _ =
     e ->
     T.pf "Exception from main\n"; raise e
 ;;
+

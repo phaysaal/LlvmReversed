@@ -58,6 +58,7 @@ let e_print _ =
 let funcdir = ref "";;
 let cfunc = ref "";;
 
+let max_filename = 150;;
 (*
 let kmod = ref "";;
  *)
@@ -204,6 +205,8 @@ let rec concatS s f = function
 
 let fstrL f s () =
   concatS s (f ())
+
+let fstrId = fun () s -> Format.sprintf "%s" s
   
 let rec iterS f delim = function
 	| [] -> p ""
@@ -384,21 +387,28 @@ let print_gc stat =
   
 ;;
 
-let flatten_path str =
-  String.map (fun c -> if c = '/' || c = '.' then '_' else c) str 
+let corr_filename s =
+  if String.length s > max_filename then
+    String.sub s (String.length s-max_filename) max_filename
+  else
+    s
 
+let flatten_path str =
+  let s = String.map (fun c -> if c = '/' || c = '.' then '_' else c) str  in
+  corr_filename s
+  
 let make_path dir tag name =
   dir ^ "/" ^ (flatten_path tag) ^ "___" ^ name
 
 let new_prog_var _ = num.contents <- (!num + 1); !cfunc ^ "#_" ^ (string_of_int !num);;
 
 let write_file filename data =
-  let fout = open_out filename in
+  let fout = open_out (filename) in
   Marshal.to_channel fout data [];
   close_out fout;;
 
 let read_file filename =
-  let fin = open_in filename in
+  let fin = open_in (flatten_path filename) in
   try
     let data = Marshal.from_channel fin in
     close_in fin;

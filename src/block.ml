@@ -259,7 +259,7 @@ let null = T.NULL ;;
 let _T e = T.EXP e ;;
 
 let corr_id v =
-  let mx = 150 in
+  (* let mx = 300 in *)
   let v' =
     if String.contains v '.' then
       String.map (function '.' -> '_' | '$' -> '_' | c -> c) v
@@ -271,13 +271,8 @@ let corr_id v =
       "GLOBAL__" ^ String.sub v' 1 (String.length v' - 1)
     else
       v' in
-  let v'3 =
-    if String.length v'' > mx then
-      String.sub v'' (String.length v''-mx) mx
-    else
-      v''
-  in
-  v'3
+  
+  v''
 ;;
 
 let var x attr = E.VAR (corr_id x, attr) ;;
@@ -398,7 +393,10 @@ let rec mod_free_var = function
     | DECL (a, len, init_data, y, l) ->
        let ms, fs = mod_free_var y in
        let zs = S.union (S.union (List.map E.fv len |> List.concat |> from_list) (fv_of_init init_data)) fs in
-       S.remove a ms, S.remove a zs
+       
+       let ms' = S.remove a ms in
+       let zs' = S.remove a zs in
+       ms',zs'
     | RETURN (i, y, l) ->
        let ms, fs = mod_free_var y in
        ms, S.union (T.fv i |> from_list) fs
@@ -651,16 +649,16 @@ let restore_prog structures p =
        (* pprint 2 (ASSIGN (a, T.EXP b, SKIP, l)); *)
        let y' = substitute a b y in
        let (r,s), y'' = restore_prog locals y' in
-       if !noop || (* E.is_global a || E.is_param a ||*) not (List.mem a locals) || S.mem a s then
+       (* if !noop || (* E.is_global a || E.is_param a ||*) not (List.mem a locals) || S.mem a s then *)
          (S.add a r, addfvs s (E.fv b)), y''
-       else
-         (r,s), y''
+       (* else
+         (r,s), y'' *)
     | ASSIGN (a, b, y, l) ->
        let (r, s), y' = restore_prog locals y in
-       if !noop || (* E.is_global a || E.is_param a ||*) not (List.mem a locals) || S.mem a s then
+       (* if !noop || (* E.is_global a || E.is_param a ||*) not (List.mem a locals) || S.mem a s then *)
          (r, addfvs s (T.fv b)), ASSIGN (a, b, y', l)
-       else
-         (r, s), y'
+       (* else
+         (r, s), y' *)
     | ASSERT (a, y, l) ->
        let r, y' = restore_prog locals y in
        addfv r (F.fv (List.hd a)),  ASSERT (a, y', l)
@@ -671,11 +669,11 @@ let restore_prog structures p =
                 y, l),d3) when x1=x2 && x=x1 ->
        let (r, s), y' = restore_prog locals y in
        
-       if E.is_global x1 || E.is_param x1 || S.mem x1 s then
+       (* if E.is_global x1 || E.is_param x1 || S.mem x1 s then *)
          let s' = S.add x s in
          (r, addfvs s' (B.fv a)), DECL (x, d1, d2, IF (a, p1, p2, y', l), d3)
-       else
-         (r,s), y'
+       (* else
+         (r,s), y' *)
     | IF (a, b, c, y, l) ->
        (* let nn = !noop in
        noop := true; *)
@@ -703,10 +701,10 @@ let restore_prog structures p =
            None ->
             (r, addfvs s fv_b), PROCCALL (z, a, b, i, y', l)
          | Some z' ->
-            if !noop || (* E.is_global z' || E.is_param z' || *) not (List.mem z' locals) || S.mem z' s then
+            (* if !noop || (* E.is_global z' || E.is_param z' || *) not (List.mem z' locals) || S.mem z' s then *)
               (r, addfvs s (z'::fv_b)), PROCCALL (z, a, b, i, y', l)
-            else
-              (r, addfvs s fv_b), PROCCALL (None, a, b, i, y', l)
+            (* else
+              (r, addfvs s fv_b), PROCCALL (None, a, b, i, y', l) *)
        end
     | CONS (a, b, y, l) ->
        let r, y' = restore_prog locals y in
@@ -736,7 +734,7 @@ let restore_prog structures p =
     | PARALLEL (b, c, y, l) ->
        let r, y' = restore_prog locals y in
        r, PARALLEL (b, c, y', l)
-    (* | BLOCK (BLOCK (a, SKIP, l), y, _) *)
+    | BLOCK (BLOCK (a, SKIP, l), y, _)
     | BLOCK (a, y, l) ->
        let (r1,s1), a' = restore_prog [] a in
        let (r2,s2), y' = restore_prog locals y in
@@ -752,10 +750,10 @@ let restore_prog structures p =
            if S.mem a r then
              (S.remove a r, s), y'
            else
-             if !noop || E.is_global a || E.is_param a || S.mem a s then
+             (* if !noop || E.is_global a || E.is_param a || S.mem a s then *)
                (r, s'), DECL (a, len, init_data, y', l)
-             else
-               (r, s), y'
+             (* else
+               (r, s), y' *)
          in
          
          if not !noop && init_data = INIT_E then
@@ -789,7 +787,9 @@ let restore_prog structures p =
               restore_prog locals (ASSERT ([([],[b],[],[])],y,l))
            | LOOKUP (a1, pt, fld,
                      ASSIGN (c, a2, y, _), _) when a=a1 && a=T.toExp a2 && is_not_in y ->
-              restore_prog locals (LOOKUP (c, pt, fld, y, l))
+              let p = LOOKUP (c, pt, fld, y, l) in
+              
+              restore_prog locals (p)
            | _ ->
               deal_decl ()
          else
@@ -848,7 +848,7 @@ let adjust_ptr vars p =
          if VR.mem an vars then
            let attr' = VR.find an vars in
            if not (E.is_ptr a) && List.mem E.PTR attr' then
-             mutation (_T a) "*" b' 
+             join_at_last y' (mutation (_T a) "*" b') 
            else
              ASSIGN (a, b',y',l)
          else
@@ -917,9 +917,9 @@ let adjust_ptr vars p =
   adjust_ptr [] p
 
 
-let adjust_calls aux_funcs p =
+let adjust_calls (aux_funcs:'a) p =
   let module VR = Map.Make(String) in
-
+  
   let rec adjust_calls p =
     match p with
     | SKIP -> p
@@ -944,9 +944,11 @@ let adjust_calls aux_funcs p =
          let y' = adjust_calls  y in
          try
            let sa, attr = E.decode (T.toExp a) in
+           
            let (fs_name, args, _) = List.find (fun (a',_,_) -> a'=sa) aux_funcs in
+           dbgf "BtoF" "%s (%a)" sa (fstrL T.fstr ",") args;
            let a' = _T @@ E.encode (fs_name, attr) in
-           PROCCALL (z, a', args, i, y', l)
+           PROCCALL (z, a', b@args, i, y', l)
          with
            Not_found ->
         PROCCALL (z, a, b, i, y', l)
@@ -995,4 +997,72 @@ let adjust_calls aux_funcs p =
        let y' = adjust_calls  y in
        LABEL (lbl, el, y', l)
   in
-  adjust_calls p
+  let p' = adjust_calls p in
+  let aux_fs:'a = List.map (fun (a,b,(c,d,e)) -> (a,b,(c,d,adjust_calls e))) aux_funcs in
+  p', aux_fs
+
+let rec ends_with_ret = function
+    | SKIP -> false
+    | FAIL -> false
+    | ASSIGN (_, _, y, _)
+    | ASSERT (_, y, _)
+    | IF (_, _, _, y, _)
+    | WHILE (_, _, _, _, y, _)
+    | PROCCALL (_, _, _, _, y, _)
+    | CONS (_, _, y, _)
+    | MUTATION (_, _, _, y, _)
+    | LOOKUP (_, _, _, y, _)
+    | DISPOSE (_, y, _)
+    | MALLOC (_, _, y, _)
+    | SARRAY (_, _, _, y, _)
+    | MAPS (_, _, y, _)
+    | PARALLEL (_, _, y, _)
+    | DECL (_, _, _, y, _)
+    | BREAK (y, _) 
+    | CONTINUE (y, _)
+    | LABEL (_, _, y, _) ->
+       ends_with_ret y
+    | BLOCK (y1, y2, _) ->
+       ends_with_ret y1 || ends_with_ret y2
+    | RETURN (_, _, _) ->
+       true
+    
+let call_to_ret attr = function
+  | PROCCALL (None, fn, args, i, y, l) ->
+     let fv = fresh_var attr in
+     let d  = decl fv 1 in
+     let p  = PROCCALL (Some fv, fn, args, i, y, l) in
+     let r  = return @@ _T fv in
+     block @@ join_progs [d;p;r]
+  | PROCCALL (Some v, fn, args, i, y, l) as p ->
+     let r  = return @@ _T v in
+     block @@ join_progs [p;r]
+  | p -> p
+
+let ret_merge = function
+    IF (b,
+        BLOCK(
+            DECL(v1,a1,b1,
+                 PROCCALL (Some v1',fn1,arg1,i1,
+                           RETURN (T.EXP v1'',SKIP,l2),
+                           l4),
+                 l1),
+            SKIP,_),
+        BLOCK(
+            DECL(v2,_,_,
+                 PROCCALL (Some v2',fn2,arg2,i2,
+                           RETURN (T.EXP v2'',SKIP,_),
+                           l5) ,
+                 _),
+            SKIP,_),
+        SKIP, l) when v1=v1' && v1'=v1'' && v2=v2' && v2'=v2''->
+    DECL(v1,a1,b1,
+         IF (b,
+             PROCCALL (Some v1',fn1,arg1,i1,SKIP,l4),
+             PROCCALL (Some v1',fn2,arg2,i2,SKIP,l5),
+             RETURN (T.EXP v1'',SKIP,l2),l
+           )
+         ,l)
+  
+  | p -> p
+           

@@ -17,12 +17,19 @@ module P = Print
 exception Err of string
 exception OPC of string
 exception PHI of L.llvalue
+exception ARG
 
 let func_dir = ref "";;
 let current_func = ref (E.CONST 0);;
-let btf = ref true ;;
+let current_block = ref (-1);;
+let btf = ref false ;;
 let rem_instrs = ref [];;
 let one_func = ref "";;
+let non_pattern = ref false ;;
+let blk_to_idx = ref VR.empty ;;
+let unnamed_param = ref VR.empty ;;
+let blk_to_brs = ref VR.empty ;;
+let all_blks : (E.t * B.t) VR.t ref = ref VR.empty;;
 
 let phis : (L.llvalue * BX.t) list ref = ref [] ;;
 
@@ -84,7 +91,10 @@ let rec get_struct llt =
     | _ -> None
 ;;
 
-
+let enblock = function
+    B.BLOCK _ as p -> p
+  | p -> B.block p
+;;
 
 let add_struct lli =
 
@@ -182,17 +192,21 @@ let is_declared v =
 let write_func fname filename params body =
   if !func_dir <> "" then
     begin
-      let sname = E.fstr () fname in
-      let file = F.make_path !func_dir filename sname in
-      let out = open_out file in
+      
+      
+      
       let b = (fname, params, body) in
       let pr = G.PROC (b, V.Formula.empty, V.Formula.trueempty, [], B.dl) in
-
+      (*
+      let sname = E.fstr () fname |> F.corr_filename in
+      let file = F.make_path !func_dir filename sname  in 
+      let out = open_out file in
       Marshal.to_channel out pr [];
       close_out out;
       let fn = Block.__N fname in
       let ffile = G.FFILE (file, fn) in
-      ffile
+      ffile *)
+      pr
     end
   else
     begin
@@ -294,69 +308,150 @@ let rec is_struct llty =
   | _                      -> false
 ;;
 
-let rec get_exp_from_llvalue ?(addr=false) vars lli =
-  let ps, v =
-    let vk = L.classify_value lli in
-    match vk with
-      VK.ConstantInt
-      ->
-      begin                                              F.dbgf "VAL" "%s is Constant_int" (stv lli);
-        let r =
-          match L.int64_of_const lli with
-            Some s ->
-             (Int64.to_int s)
-          | None ->
-             begin
-               F.dbgf "VAL" "Error at get_exp_from_llvalue (int)";
-               raise (Err "Not an integer (get_exp_from_llvalue)")
-             end
-        in
-        [], B.const r
-      end
-    | VK.ConstantExpr ->
-      begin                                              F.dbgf "VAL" "%s is Constant_exp" (stv lli);
-        get_const_expr vars lli
-      end
-    | VK.NullValue | ConstantPointerNull | ConstantAggregateZero ->
-      begin                                              F.dbgf "VAL" "%s is Null" (stv lli);
-        [], B.const 0
-      end
-    | VK.ConstantFP ->
-       begin
-         let flv = L.float_of_const lli in
-         match flv with
-           Some f ->
-           [], B.constf f
-         | None ->
-            begin
-              F.dbgf "VAL" "Error at get_exp_from_llvalue (double)";
-              raise (Err "Not an integer (get_exp_from_llvalue)")
-            end
-       end
-    | _ ->
-      begin                                              F.dbgf "VAL" "%s is %s" (stv lli) (P.print_value_kind @@ L.classify_value lli);
-        let s = L.value_name lli in
-        if s = "" then
-          begin                                          F.dbgf "VAL" "%s is ''" s;
-            let r =
-              try get_exp_from_ref vars lli with
-                e -> Printf.printf "Called from exp...\n"; raise e in
-            r
-          end
-        else
-          begin                                          F.dbgf "VAL" "%s is not ''" s;
-            let _, r = get_var vars ~addr:addr lli in
-            [], r
-          end
-      end
-  in
-  ps, v
+let add_ps ps p =
+  B.join_at_last p (B.join_progs ps)
+;;
 
+
+let rec get_exp_from_llvalue ?(addr=false) vars lli =
+
+  let get_const_only_exp lli =
+    let ps, v =
+      let vk = L.classify_value lli in
+      match vk with
+        VK.ConstantInt ->
+         begin
+           F.dbgf "VAL" "%s is Constant_int" (stv lli);
+           let r =
+             match L.int64_of_const lli with
+               Some s ->
+                (Int64.to_int s)
+             | None ->
+                begin
+                  F.dbgf "VAL" "Error at get_exp_from_llvalue (int)";
+                  raise (Err "Not an integer (get_exp_from_llvalue)")
+                end
+           in
+           [], B.const r
+         end
+      | VK.ConstantExpr ->
+         begin
+           F.dbgf "VAL" "%s is Constant_exp" (stv lli);
+           get_const_expr vars lli
+         end
+      | VK.NullValue | ConstantPointerNull | ConstantAggregateZero ->
+         begin
+           F.dbgf "VAL" "%s is Null" (stv lli);
+           [], B.const 0
+         end
+      | VK.ConstantFP ->
+         begin
+           let flv = L.float_of_const lli in
+           match flv with
+             Some f ->
+              [], B.constf f
+           | None ->
+              begin
+                F.dbgf "VAL" "Error at get_exp_from_llvalue (double)";
+                raise (Err "Not an integer (get_exp_from_llvalue)")
+              end
+         end
+      | _ ->
+         raise (Err "")
+    in
+    ps,v
+  in
+  
+  try get_const_only_exp lli with
+  | _ ->
+     begin
+       F.dbgf "VAL" "%s is %s" (stv lli) (P.print_value_kind @@ L.classify_value lli);
+       let s = L.value_name lli in
+       if s = "" then
+         begin
+           F.dbgf "VAL" "%s is ''" s;
+           let stvlli = stv lli in
+           let r =
+             if VR.mem stvlli !unnamed_param then
+               [], VR.find stvlli !unnamed_param
+             else
+                try get_exp_from_ref vars lli with
+                  PHI instr ->
+                   F.dbgf "STO" "%s" (L.operand instr 0 |> stv);
+                   let p, v = get_phi_val vars instr in
+                   p, v
+                | e ->
+                   Printf.printf "Called from exp...\n"; raise e in
+           r
+         end
+       else
+         begin
+           F.dbgf "VAL" "%s is not ''" s;
+           let _, r = get_var vars ~addr:addr lli in
+           [], r
+         end
+     end
+    
+
+
+and mk_phi vars v instr =
+  if !non_pattern then
+    begin
+      let srcblk = _T @@ B.var "src_blk" [] in
+      let incomings = L.incoming instr in
+      let p = List.fold_left (fun p (l,b) ->
+                  let _, exp = get_exp_from_llvalue vars l in
+                  let bnm = P.get_blk_name b in
+                  let idx = VR.find bnm !blk_to_idx in
+                  let cond = BX.UNIT (srcblk, V.Op.EQ, _T @@ E.CONST idx) in
+                  let p1 = B.assign v @@ _T exp in
+                  B.mk_if cond p1 p
+                ) B.SKIP incomings in
+      p
+    end
+  else
+    raise Not_found
+  
+and get_phi_val vars instr =
+  if !non_pattern then
+    begin
+      let fv = B.fresh_var [] in
+      let dc = B.decl fv 1 in
+      let p  = mk_phi vars fv instr in
+      dc::p::[], fv
+    end
+  else
+    raise Not_found
+  
+and mk_phi' vars lli instr =
+  F.dbgf "PHI" "Found Phi. Phis: %d" (List.length !phis);
+  if !non_pattern then
+    raise Not_found
+  else
+    let (_, bexp) =
+      try
+        List.find (fun (instr',_) ->
+            F.dbgf "PHI" "-> %s\n%s" (stv instr) (stv instr');
+            instr'=instr) !phis
+      with e ->
+        F.dbgf "PHI" "Not Found in Phi.";
+        raise e
+    in
+    F.dbgf "PHI" "bexp: %a" BX.fstr bexp;
+    let vars', v = get_var vars lli in
+    let p0 = B.decl v 1 in
+    let p1 = mk_phi vars' v instr in
+    let p = B.join_at_last p1 p0 in
+    vars', p, v
+    
 and get_exp_from_ref vars lli =
   let opcode = try L.instr_opcode lli with
-                 e -> Printf.printf "%s\n" (L.string_of_llvalue lli);
-                      Printf.printf "%s\n" (P.print_value_kind (L.classify_value lli));
-                      raise e in
+                 e ->
+                 let vk = L.classify_value lli in
+                 if vk = VK.Argument then
+                   raise ARG
+                 else
+                 raise e in
   match opcode with
     O.Load
   | O.BitCast
@@ -400,10 +495,15 @@ and get_exp_from_ref vars lli =
        else
          raise (Err "BitCast problem")
      end
-  | FPToUI | FPToSI ->
+  | FPToUI | FPToSI | PtrToInt ->
      let opc = L.operand lli 0 in
      let ps, rhs = get_exp_from_llvalue vars opc in
      let frv = B.fresh_var [E.SIMPLE (E.simple_size "int")] in
+     [B.assign frv (B._T rhs)]@ps, frv
+  | IntToPtr ->
+     let opc = L.operand lli 0 in
+     let ps, rhs = get_exp_from_llvalue vars opc in
+     let frv = B.fresh_var [E.PTR;E.SIMPLE (E.simple_size "int")] in
      [B.assign frv (B._T rhs)]@ps, frv
   | LandingPad ->
      [], B.const 0
@@ -417,8 +517,15 @@ and get_exp_from_ref vars lli =
      let nv = B.fresh_var [] in
      [], nv
   | PHI ->
-     Printf.printf "%s\n" (stv lli);
      raise (PHI lli)
+  | GetElementPtr ->
+     let ps, (ptr, s_fld) = get_ptr_element vars lli in
+     let fv = B.fresh_var [] in
+     
+     let p = B.lookup fv ptr s_fld in
+     ps@[p], fv
+     (* F.pn "*********";
+     raise (Err "") *)
   | _ ->
      Printf.printf "get_exp_from_ref %s\n" (L.string_of_llvalue lli);
      raise (Err "Other opcode in get_exp_from_ref")
@@ -530,11 +637,13 @@ and get_const_expr vars lli =
     raise (Err ("GetConstExpr| Unsupported Number of Operands " ^ (string_of_int opn)))
 
 and get_var vars ?(is_global=false) ?(is_param=false) ?(is_local=false) ?(addr=false) ?(alloca=false) lli =
+ 
   let vn'' = L.value_name lli in
   let vn' = if vn'' = "" then
               get_exp_from_ref vars lli |> snd |> E.var_decode
             else
               vn'' in
+  
   let vn = if L.classify_value lli = VK.GlobalVariable then "@" ^ vn' else vn' in            F.dbgf "VAR" "\nGet_Var(%s)|vn: %s" vn vn;
   let vars', v=
     if VR.mem vn vars && not is_param && not is_local then
@@ -561,7 +670,9 @@ and get_var vars ?(is_global=false) ?(is_param=false) ?(is_local=false) ?(addr=f
         let v = B.var vn attr'' in                                                           F.dbgf "VAR" "|Get_Var(%s)|attr'': %a" vn (F.fstrL (fun () a -> a) ",") (List.map E.print_attr attr'');
         let vars' = VR.add vn attr'' vars in
         vars', v
-      end in                                                                                 F.dbgf "VAR" "Get_Var(%s)|var: %a" vn E.fstr v;
+      end in
+  F.dbgf "VAR" "Get_Var(%s)|var: %a" vn E.fstr v;
+
   vars', v
 ;;
 
@@ -663,6 +774,8 @@ let get_called_fname vars lli =
         let fname = get_var vars op2 in
         fname
     end
+  else if vk = VK.InlineAsm then
+    raise (Err "Asm")
   else
     begin
         F.dbgf "CALL" "Call to: %s" (stv op2);
@@ -696,78 +809,114 @@ let get_parameters vars lli =
   get_params 0 n [] []
 ;;
 
-let add_ps ps p =
-  B.join_at_last p (B.join_progs ps)
-;;
-
 let rec get_bexp_from_comp vars lli =
-  let opcode = L.instr_opcode lli in
-  match opcode with
-    O.ICmp | FCmp ->
-     let arg1 = L.operand lli 0 in
-     let arg2 = L.operand lli 1 in
-     F.dbgf "BEXP" "lli: %s" (stv lli);
-     F.dbgf "BEXP" "arg1: %s" (stv arg1);
-     F.dbgf "BEXP" "arg2: %s" (stv arg2);
-     let ps1, e_arg1 = try get_exp_from_llvalue vars arg1 with e -> Printf.printf "arg1\n"; raise e in
-     let ps2, e_arg2 = try get_exp_from_llvalue vars arg2 with e -> Printf.printf "arg2\n"; raise e in
-     let pred = L.icmp_predicate lli in
-     begin
-       let res =
-         match pred with
-           Some op -> mk_i_pred e_arg1 e_arg2 op
-         | None ->
-            begin
-              let pred = L.fcmp_predicate lli in
-              let res =
-                match pred with
-                  Some op ->
-                   mk_f_pred e_arg1 e_arg2 op
-                | None -> raise (Err ("Not compatible yet. " ^ (stv lli)))
-              in
-              res
-            end
-       in
-       ps1@ps2, res
-     end
-  | Trunc ->
-     get_bexp_from_comp vars @@ L.operand lli 0
-  | Load ->
-     let op1 = L.operand lli 0 in
-     let ps, v = get_exp_from_llvalue vars op1 in
-     ps, BX.UNIT (B._T v, V.Op.NE, B._T (B.const 0))
-  | Or ->
-     let arg1 = L.operand lli 0 in
-     let arg2 = L.operand lli 1 in
-     let ps1, e_arg1 = try get_bexp_from_comp vars arg1 with e -> Printf.printf "arg1\n"; raise e in
-     let ps2, e_arg2 = try get_bexp_from_comp vars arg2 with e -> Printf.printf "arg2\n"; raise e in
-     ps1@ps2, BX.OP (e_arg1, V.Op.OR, e_arg2)
-  | And ->
-     let arg1 = L.operand lli 0 in
-     let arg2 = L.operand lli 1 in
-     let ps1, e_arg1 = try get_bexp_from_comp vars arg1 with e -> Printf.printf "arg1\n"; raise e in
-     let ps2, e_arg2 = try get_bexp_from_comp vars arg2 with e -> Printf.printf "arg2\n"; raise e in
-     ps1@ps2, BX.OP (e_arg1, V.Op.AND, e_arg2)
-  | ZExt | BitCast ->
-     get_bexp_from_comp vars @@ L.operand lli 0
-  | Call ->
-     let called_fun = get_call lli in
-     let vars', fname = get_called_fname vars called_fun in
-     let ps, params = get_parameters vars' called_fun in
-     F.dbgf "CALL" "Parameters: %d" (List.length params);
-     let t_fname = B._T @@ fname in
-     let vv = L.value_name lli in
-     F.dbgf "CALL" "vv:%s" vv;
-     let ps2, v = get_exp_from_llvalue vars lli in
-     let p0 = B.decl v 1 in
-     let p1 = add_ps (ps@ps2) @@ B.call ~ret:(Some v) t_fname params in
-     let p = B.join_at_last p1 p0 in
-     F.dbg "CALL" "" (B.pprint 0) p1;
-     [p], BX.(B._T v =/ T.zero)
-   | _ ->
-     pn "BExp Exception in";
-     pn @@ stv lli;
-     raise (Err "Not supported opcode in bexp")
+  
+  if stv lli = "i1 true" then
+    [], BX._T
+  else if stv lli = "i1 false" then
+    [], BX._F
+  else
+    let opcode = L.instr_opcode lli in
+    begin
+      match opcode with
+        O.ICmp
+      | FCmp ->
+         let arg1 = L.operand lli 0 in
+         let arg2 = L.operand lli 1 in
+         F.dbgf "BEXP" "lli: %s" (stv lli);
+         F.dbgf "BEXP" "arg1: %s" (stv arg1);
+         F.dbgf "BEXP" "arg2: %s" (stv arg2);
+         let ps1, e_arg1 = try get_exp_from_llvalue vars arg1 with e -> Printf.printf "arg1\n"; raise e in
+         let ps2, e_arg2 = try get_exp_from_llvalue vars arg2 with e -> Printf.printf "arg2\n"; raise e in
+         let pred = L.icmp_predicate lli in
+         begin
+           let res =
+             match pred with
+               Some op -> mk_i_pred e_arg1 e_arg2 op
+             | None ->
+                begin
+                  let pred = L.fcmp_predicate lli in
+                  let res =
+                    match pred with
+                      Some op ->
+                       mk_f_pred e_arg1 e_arg2 op
+                    | None -> raise (Err ("Not compatible yet. " ^ (stv lli)))
+                  in
+                  res
+                end
+           in
+           ps1@ps2, res
+         end
+         
+      | Trunc ->
+         get_bexp_from_comp vars @@ L.operand lli 0
+      | Load ->
+         let op1 = L.operand lli 0 in
+         let ps, v = get_exp_from_llvalue vars op1 in
+         ps, BX.UNIT (B._T v, V.Op.NE, B._T (B.const 0))
+      | Or ->
+         let arg1 = L.operand lli 0 in
+         let arg2 = L.operand lli 1 in
+         let ps1, e_arg1 = try get_bexp_from_comp vars arg1 with e -> Printf.printf "arg1\n"; raise e in
+         let ps2, e_arg2 = try get_bexp_from_comp vars arg2 with e -> Printf.printf "arg2\n"; raise e in
+         ps1@ps2, BX.OP (e_arg1, V.Op.OR, e_arg2)
+      | Xor ->
+         let arg1 = L.operand lli 0 in
+         let arg2 = L.operand lli 1 in
+         let ps1, e_arg1 = try get_bexp_from_comp vars arg1 with e -> Printf.printf "arg1\n"; raise e in
+         
+         let ps2, e_arg2 = try get_bexp_from_comp vars arg2 with e ->  Printf.printf "arg2\n"; raise e in
+         
+         ps1@ps2, BX.OP (e_arg1, V.Op.XOR, e_arg2)
+      | And ->
+         let arg1 = L.operand lli 0 in
+         let arg2 = L.operand lli 1 in
+         let ps1, e_arg1 = try get_bexp_from_comp vars arg1 with e -> Printf.printf "arg1\n"; raise e in
+         let ps2, e_arg2 = try get_bexp_from_comp vars arg2 with e -> Printf.printf "arg2\n"; raise e in
+         ps1@ps2, BX.OP (e_arg1, V.Op.AND, e_arg2)
+      | ZExt | BitCast ->
+         get_bexp_from_comp vars @@ L.operand lli 0
+      | Call ->
+         begin
+           try
+             let called_fun = get_call lli in
+             let vars', fname = get_called_fname vars called_fun in
+             let ps, params = get_parameters vars' called_fun in
+             F.dbgf "CALL" "Parameters: %d" (List.length params);
+             let t_fname = B._T @@ fname in
+             let vv = L.value_name lli in
+             F.dbgf "CALL" "vv:%s" vv;
+             let ps2, v = get_exp_from_llvalue vars lli in
+             let p0 = B.decl v 1 in
+             let p1 = add_ps (ps@ps2) @@ B.call ~ret:(Some v) t_fname params in
+             let p = B.join_at_last p1 p0 in
+             F.dbg "CALL" "" (B.pprint 0) p1;
+             [p], BX.(B._T v =/ T.zero)
+           with
+             Err "Asm" ->
+              raise (Err "Asm")
+           | e -> raise e
+         end
+      | Invoke ->
+         let vv = L.value_name lli in
+         if vv = "" then
+           begin
+             pn "BExp Exception in";
+             pn @@ stv lli;
+             raise (Err "Not supported opcode in bexp")
+           end
+         else
+           let dt = _T @@ B.var vv [] in
+           [], BX.UNIT (dt, V.Op.NE, T.zero)
+      | PHI ->
+         let ps, v = get_phi_val vars lli in
+         let dt = _T v in
+         ps, BX.UNIT (dt, V.Op.NE, T.zero)
+      | _ ->
+         pn "BExp Exception in";
+         pn @@ stv lli;
+         raise (Err "Not supported opcode in bexp")
+    end
 ;;
 
 let get_bexp_from_llvalue vars lli =
@@ -846,10 +995,11 @@ let mk_assign_maybe vars lli o =
   let t_operand ?(addr=false) i =
     let opc = L.operand lli i in
     let ps, opv =
+      
       try get_exp_from_llvalue vars ~addr:addr opc with
-        Not_found -> raise Not_found
-      | Err s -> raise (Err s)
-      | e -> raise e
+        Not_found -> F.pn "Not found"; raise Not_found
+      | Err s -> F.pn ("Err " ^ s); raise (Err s)
+      | e -> F.pn "Something else"; raise e
     in
     let pre_prog, t_opc =
       if E.is_ptr opv then
@@ -900,6 +1050,8 @@ let mk_assign_maybe vars lli o =
        bin V.Op.SUB
     | O.Mul ->
        bin V.Op.MUL
+    | O.Xor ->
+       bin V.Op.XOR
     | O.SDiv ->
 
        let p = bin V.Op.DIV in
@@ -953,32 +1105,7 @@ let get_last_cond_br (inst : L.llvalue) =
   | _ -> None
 ;;
 
-let mk_phi vars lli instr =
-  F.dbgf "PHI" "Found Phi. Phis: %d" (List.length !phis);
 
-  let (_, bexp) = try
-      List.find (fun (instr',_) ->
-          F.dbgf "PHI" "-> %s\n%s" (stv instr) (stv instr');
-          instr'=instr) !phis
-    with e ->
-      F.dbgf "PHI" "Not Found in Phi.";
-      raise e
-  in
-  F.dbgf "PHI" "bexp: %a" BX.fstr bexp;
-  let vars', v = get_var vars lli in
-  let p0 = B.decl v 1 in
-  if L.num_operands instr = 2 then
-    let op0 = L.operand instr 0 in
-    let op1 = L.operand instr 1 in
-    let ps0, exp0 = get_exp_from_llvalue vars' op0 in
-    let ps1, exp1 = get_exp_from_llvalue vars' op1 in
-    let p1 = B.assign v (B._T exp0) in
-    let p2 = B.assign v (B._T exp1) in
-    let p = add_ps (ps0@ps1) @@ B.join_at_last (B.mk_if bexp p1 p2) p0 in
-    vars', p, v
-  else
-    raise (Err "Not 2 values in PHI")
-;;
 
 let get_invoke_data vars lli =
   let called_fun = get_call lli in
@@ -993,23 +1120,29 @@ let get_invoke_data vars lli =
   vars', ps, p0,  p1_blk, p2_blk
 ;;
 
-
-let rec to_while_t_inst ?(tl=false) vars lli =
+let rec to_while_t_inst ?(tl=false) (cblk, callstack) vars lli =
   if List.mem lli !rem_instrs then
     vars, B.SKIP
   else
     begin
+      
       let st l = L.string_of_llvalue l in
       let str = st lli in
       if tl then F.dbg "CUR" "Current Instr:" F.p str;
-      let opcode = try L.instr_opcode lli with  _ -> pf "OPCode - 1"; raise (OPC "OpCode -1") in
-      let vars', r =
-        match opcode with
-        | O.Invalid -> vars, B.SKIP
-        | O.Ret ->
-           if L.num_operands lli = 0 then
-             vars, B.return (B._T @@ V.Exp.CONST 0)
-           else
+
+      let vc = L.classify_value lli in
+      match vc with
+        VK.InlineAsm ->
+        vars, B.SKIP
+      | _ ->
+         let opcode = try L.instr_opcode lli with  _ -> pf "OPCode - 1"; raise (OPC "OpCode -1") in
+         let vars', r =
+           match opcode with
+           | O.Invalid -> vars, B.SKIP
+           | O.Ret ->
+              if L.num_operands lli = 0 then
+                vars, B.return (B._T @@ V.Exp.CONST 0)
+              else
              begin
                F.dbgf "RET" "operand: %d" (L.num_operands lli);
                F.dbgf "RET" "operand: %s" (stv lli);
@@ -1068,31 +1201,52 @@ let rec to_while_t_inst ?(tl=false) vars lli =
                in
                vars, r
              end
-        | O.Br ->
-           if !btf  then
-             let fn = E.var_decode !current_func in
-             if L.num_operands lli == 1 then
-               begin
-                 let vrn = L.value_name @@ L.operand lli 0 in
-                 F.dbgf "BR" "fn: %s, vrn: %s " fn vrn;
-                 let e_vrn = B.var (fn ^ vrn) [] |> B._T in
-                 vars, B.call e_vrn []
-               end
-             else
-               match get_last_cond_br lli with
-                 Some (cond, tlbl_name, flbl_name) ->
-                  let ps, local_cond = get_bexp_from_comp vars  cond in
-                  let e_vrnT = B.var (fn ^ tlbl_name) [] |> B._T in
-                  let e_vrnF = B.var (fn ^ flbl_name) [] |> B._T in
-                  let p1 = B.call e_vrnT [] in
-                  let p2 = B.call e_vrnF [] in
-                  vars, B.mk_if local_cond p1 p2
-               | None ->
-                  vars, B.SKIP
+           | O.Br ->
+              if !non_pattern then
+                match L.get_branch lli with
+                  Some (L.(`Unconditional blk)) ->
+                   let pp = get_blk_call (cblk, callstack) vars blk in
+                   F.dbgf "BtoFU" "Br@ cur_blk: %d --> %s" cblk (P.get_blk_name blk);
+                   F.pf_s "BtoFU" (B.pprint 0) pp;
+                   vars, pp
+                | Some L.(`Conditional (cond, tr_blk, fl_blk)) ->
+                   F.dbgf "BtoFC" "@@@@@@@@@@@@@@";
+                   let p1 = get_blk_call (cblk, callstack) vars tr_blk in
+                   let p2 = get_blk_call (cblk, callstack) vars fl_blk in
+                   
+                   let ps, local_cond = get_bexp_from_comp vars  cond in
+                   let ifp = B.ret_merge @@ B.mk_if local_cond p1 p2 in
+                   vars, B.join_progs (ps@[ifp])
+             | None ->
+                vars, B.SKIP
            else
              vars, B.SKIP
         | O.Switch ->
-           raise (Err "Switch - Not understood yet")
+           let cur_blk = _T @@ E.CONST !current_block in
+           F.dbgf "SWI" "%s" (stv lli);
+           let n = L.num_operands lli in
+           let get_exp vars i = get_exp_from_llvalue vars @@ L.operand lli i in
+           let vars', comparator = get_exp vars 0 in
+           let mk_cond a =
+             BX.UNIT (_T comparator, V.Op.EQ, _T a)
+           in
+           let fn = E.var_decode !current_func in
+           let mk_call i =
+             let vrn = L.value_name @@ L.operand lli i in
+             F.dbgf "SWI" "fn: %s, vrn: %s " fn vrn;
+             let e_vrn = B.var (fn ^ vrn) [] |> B._T in
+             B.call e_vrn [cur_blk]
+           in
+           let rec switch_decomp i =
+             if i >= n then
+               mk_call 1
+             else
+               let _, tobe = get_exp vars i in
+               let cond = mk_cond tobe in
+               B.mk_if cond (mk_call (i+1)) (switch_decomp (i+2))
+           in
+           let p = switch_decomp 2 in
+           vars, p
         | O.IndirectBr ->
            raise (Err "Switch - Not understood yet")
         |	O.Add ->
@@ -1114,6 +1268,8 @@ let rec to_while_t_inst ?(tl=false) vars lli =
            vars, mk_assign_maybe vars lli O.SDiv
         |	Or ->
            vars, mk_assign_maybe vars lli O.Or
+        | Xor ->
+           vars, mk_assign_maybe vars lli O.Xor
         |	O.Alloca ->
            begin
              let vars', v = get_var vars ~is_local:true ~alloca:true lli in
@@ -1172,7 +1328,7 @@ let rec to_while_t_inst ?(tl=false) vars lli =
            let ps, e_src = try get_exp_from_llvalue vars src with
                            | PHI instr ->
                               F.dbgf "STO" "%s" (L.operand instr 0 |> stv);
-                              let _, p, v = mk_phi vars lli instr in
+                              let _, p, v = mk_phi' vars lli instr in
                               [p], v
                            | e ->
                               F.dbgf "STO" "Exception in Store";
@@ -1188,30 +1344,35 @@ let rec to_while_t_inst ?(tl=false) vars lli =
              end
            else if is_ptr_element dest then
              begin F.dbgf "STO" "Ptr_Element Case";
-                   let ps2, (ptr, fld) = get_ptr_element vars dest in                 F.dbgf "STO" "%s: %a %s" (stv lli) T.fstr ptr fld;
-                                                                                      let p = if fld="-" then
-                                                                                                B.assign (T.toExp ptr) (B._T e_src)
-                                                                                              else
-                                                                                                B.mutation ptr fld (B._T e_src) in
-                                                                                      vars, add_ps (ps@ps2) p
+                   let ps2, (ptr, fld) = get_ptr_element vars dest in
+                   F.dbgf "STO" "%s: %a %s" (stv lli) T.fstr ptr fld;
+                   let p = if fld="-" then
+                             B.assign (T.toExp ptr) (B._T e_src)
+                           else
+                             B.mutation ptr fld (B._T e_src) in
+                   vars, add_ps (ps@ps2) p
              end
            else if is_const src then
-             begin                                                                 F.dbgf "STO" "Const source";
-                                                                                   let vars', dest_v = get_var vars dest in
-                                                                                   vars', add_ps ps @@ B.assign dest_v (B._T e_src)
+             begin
+               F.dbgf "STO" "Const source";
+               let vars', dest_v = get_var vars dest in
+               vars', add_ps ps @@ B.assign dest_v (B._T e_src)
              end
            else if is_pointer src then
-             begin                                                                 F.dbgf "STO" "Pointer Src";
-                                                                                   let ps1, t_src = get_exp_from_llvalue vars src in
-                                                                                   let ps2, v_dest = get_exp_from_llvalue vars dest in
-                                                                                   vars, add_ps (ps1@ps2) @@ B.assign v_dest (B._T t_src)
+             begin
+               F.dbgf "STO" "Pointer Src";
+               let ps1, t_src = get_exp_from_llvalue vars src in
+               let ps2, v_dest = get_exp_from_llvalue vars dest in
+               vars, add_ps (ps1@ps2) @@ B.assign v_dest (B._T t_src)
              end
            else
-             begin                                                                 F.dbgf "STO" "Else Src";
-                                                                                   let ps1, e_src = get_exp_from_llvalue vars src in
-                                                                                   let ps2, v_dest = get_exp_from_llvalue vars dest in
-                                                                                   let p = indirect_src v_dest vars src in
-                                                                                   vars, add_ps (ps1@ps2) p
+             begin
+               F.dbgf "STO" "Else Src";
+               
+               let ps1, e_src = get_exp_from_llvalue vars src in
+               let ps2, v_dest = get_exp_from_llvalue vars dest in
+               let p = indirect_src v_dest vars src in
+               vars, add_ps (ps1@ps2) p
              end
         |	GetElementPtr ->
            let vn = L.value_name lli in
@@ -1249,8 +1410,15 @@ let rec to_while_t_inst ?(tl=false) vars lli =
                vars, mk_assign_maybe vars lli O.Trunc
              with
                PHI instr ->
-               let vars', p, _ = mk_phi vars lli instr in
+               F.pn "******************";
+               F.pn (stv instr);
+               let vars', p, _ = mk_phi' vars lli instr in
                vars', p
+             | e ->
+                F.pn "ZExt ******************";
+                F.pn (stv lli);
+               
+                raise e
            end
         |	SExt ->
            let src = L.operand lli 0 in
@@ -1360,7 +1528,9 @@ let rec to_while_t_inst ?(tl=false) vars lli =
                      end
                  end
              with
-               e ->
+               Err "Asm" ->
+                vars, B.SKIP
+             | e ->
                raise e
            end
 
@@ -1375,17 +1545,26 @@ let rec to_while_t_inst ?(tl=false) vars lli =
              let on = L.num_operands lli in
              let p1_blk = L.block_of_value @@ L.operand lli (on-3) in
              let p2_blk = L.block_of_value @@ L.operand lli (on-2) in
-             *)
-             let vars', ps, p0, p1_blk, p2_blk = get_invoke_data vars lli in
-             let p1,vars''  = L.fold_right_instrs (fun i (acc,_vars) ->
-                                  let _vars', b = to_while_t_inst _vars i in
-                                  B.join_at_last acc b, _vars') p1_blk (B.SKIP,vars') in
-             let p2,vars''' = L.fold_right_instrs (fun i (acc,_vars) ->
-                                  let _vars', b = to_while_t_inst _vars i in
-                                  B.join_at_last acc b, _vars') p2_blk (B.SKIP,vars'') in
-             let b = BX.non_det in
-             let p012 = B.mk_if b p1 p2 in
-             vars''', add_ps ps @@ B.join_at_last p012 p0
+              *)
+             if !non_pattern then
+               begin
+             
+               let vars', ps, p0, p1_blk, _ = get_invoke_data vars lli in
+       
+               let p = get_blk_call (cblk,callstack) vars p1_blk in
+               vars, B.join_progs (ps@[p0;p])
+               end
+             else
+               let vars', ps, p0, p1_blk, p2_blk = get_invoke_data vars lli in
+               let p1,vars''  = L.fold_right_instrs (fun i (acc,_vars) ->
+                                    let _vars', b = to_while_t_inst (cblk,callstack) _vars i in
+                                    B.join_at_last acc b, _vars') p1_blk (B.SKIP,vars') in
+               let p2,vars''' = L.fold_right_instrs (fun i (acc,_vars) ->
+                                    let _vars', b = to_while_t_inst (cblk,callstack) _vars i in
+                                    B.join_at_last acc b, _vars') p2_blk (B.SKIP,vars'') in
+               let b = BX.non_det in
+               let p012 = B.mk_if b p1 p2 in
+               vars''', add_ps ps @@ B.join_at_last p012 p0
            else
              vars, B.SKIP
         |	LandingPad->
@@ -1397,12 +1576,14 @@ let rec to_while_t_inst ?(tl=false) vars lli =
              let t_src = B._T @@ B.const 0 in
              let p = B.assign e_dest t_src in
              vars', p
-
-
-        |	InsertValue
-          |	PHI
-
-          -> vars, B.SKIP
+        |	InsertValue ->
+           vars , B.SKIP
+        |	PHI ->
+           let vv = L.value_name lli in
+           if vv = "" then
+             vars , B.SKIP
+           else
+             vars , B.SKIP
         |	Resume
           |	Unreachable
           -> vars, B.SKIP
@@ -1410,6 +1591,22 @@ let rec to_while_t_inst ?(tl=false) vars lli =
           |	And
           ->
            vars, mk_assign_maybe vars lli O.Sub
+        | AtomicRMW ->
+           
+           F.dbgf "ATOM" "|0|:%s |1|:%s" (stv @@ L.operand lli 0) (stv @@ L.operand lli 1);
+           raise (Err ("\nUnexpected ValueKind " ^ str ^ "\n"))
+        | PtrToInt ->
+           let vv = L.value_name lli in
+           if vv = "" then
+             vars , B.SKIP
+           else
+             raise (Err ("\nUnexpected ValueKind " ^ str ^ "\n"))
+        | IntToPtr ->
+           let vv = L.value_name lli in
+           if vv = "" then
+             vars , B.SKIP
+           else
+             raise (Err ("\nUnexpected ValueKind " ^ str ^ "\n"))
         | _ ->
            raise (Err ("\nUnexpected ValueKind " ^ str ^ "\n"))
       in
@@ -1420,17 +1617,203 @@ let rec to_while_t_inst ?(tl=false) vars lli =
         vars', r
     end
 
-and to_while_t_blk f vars blk =
+and to_while_t_blk2 (cblk, callstack) vars blk =
+  
+  F.dbgf "BLK" "Current Block: %s (%d) %d %a" (P.get_blk_name blk) cblk (List.length callstack) (F.fstrL F.fstrId ",") (List.rev callstack);
+  let vars', ps =
+    Llvm.fold_left_instrs
+      (fun (_vars,acc) lli ->
+        let _vars', l = to_while_t_inst ~tl:true (cblk,callstack) _vars lli in
+        F.dbgf "L2B" "-->~ %s" (stv lli);
+        F.pf_s "L2B" (B.pprint 2) l;
+        match l with
+                 B.SKIP ->
+                  _vars', acc
+               | _ ->
+                  _vars', acc @ [l]
+             ) (vars,[])
+             blk in
+  let ps' = List.filter (function
+                  B.SKIP -> false
+                | (B.BLOCK (B.SKIP, _, _)) -> false
+                | _ -> true
+              ) ps in
+  
+  match ps' with
+    [] ->
+     
+     vars', [B.SKIP]
+  | _ when List.for_all (function B.SKIP -> true | _ -> false) ps ->
+     
+     vars,  [B.SKIP]
+  | _ ->
+     (* F.pn (P.get_blk_name blk);
+     List.iter (B.pprint 2) ps; *)
+     vars', ps
+
+and get_blk_call (cblk,callstack) vars blk =
+  let cur_blk = _T @@ E.CONST cblk in
+  let fn = E.var_decode !current_func in
+  let vrn = P.get_blk_name blk in
+  F.dbgf "BtoF" "Current Block: %s (%d)" vrn !current_block; 
+  F.dbgf "BtoF" "fn: %s, vrn: %s " fn vrn;
+  let e_vrn = B.var (fn ^ vrn) [] |> B._T in
+  
+  let args, body = to_blk_funs (cblk,callstack) vars blk in
+  F.dbgf "BtoF" "|args|: %d" (List.length args);
+  
+  let rec take n ls =
+    match n, ls with
+    | 0, _ -> []
+    | _, x::xs ->
+       x::take (n-1) xs
+    | _, [] -> [] (* raise (Err "Invalid Arguments") *)
+  in
+  F.dbgf "BtoF" "~~~***~~~1";
+  let p =
+    if !non_pattern then
+      if VR.mem vrn !blk_to_brs then
+        begin
+          
+          let n = VR.find vrn !blk_to_brs in
+          F.dbgf "BtoF" "n:%d |args|:%d" n (List.length args) ;
+          let args' = take n args in
+          
+          B.call e_vrn (cur_blk::args')
+        end
+      else
+        begin
+          B.call e_vrn (cur_blk::args)
+        end
+    else
+      B.call e_vrn args
+  in
+  
+  blk_to_brs := VR.add vrn (List.length args) !blk_to_brs;
+
+  let p =
+    match body with
+      Some (fname, body') ->
+       (*
+       if B.ends_with_ret body' then *)
+         B.call_to_ret (E.get_attributes fname) p
+       (* else
+         p *)
+    | None -> p
+  in
+  F.dbgf "BtoF" "~~~***~~~";
+  
+  p
+  
+and to_blk_funs (cblk,callstack) vars llbb =
+  F.p_s "DOT" ".";
+  let fn = E.var_decode !current_func in
+  let blk_name = P.get_blk_name llbb in
+  (* if i <= n then *)
+  (* if List.exists (fun (fs_name, _, _) -> fs_name = fn ^ blk_name) !aux_funcs then
+    let _, args, _ = List.find (fun (fs_name, _, _) -> fs_name = fn ^ blk_name) !aux_funcs in
+    args
+  else *)
+    if List.length (List.filter ((=)blk_name) callstack) > 1 then
+      [], None
+    else
+      begin
+        let i = VR.find blk_name !blk_to_idx in
+        current_block := i;
+        F.dbgf "2BF" "Block %d will be translated" i;
+        let s_name = L.value_name @@ L.value_of_block llbb |> B.corr_id in
+        let fs_name = fn ^ s_name in
+        try
+          let (_, args, (n,_,p)) = List.find (fun (a,_,_) -> a = fs_name) !aux_funcs in
+          args, Some (n,p)
+        with
+          Not_found ->
+          if s_name = "" then
+            begin
+              F.dbgf "WARNING" "Unnamed block found in function %s" fn;
+              [], None
+            end
+          else
+            begin
+              begin
+                try
+                  let vars', prog' = to_while_t_blk2 (i, blk_name::callstack) vars llbb in
+                  F.dbgf "2BF" "Block %d is translated" i;
+                  
+                  let prog'' = enblock @@ B.join_progs prog' in
+                  
+                  let mv, fv = B.mod_free_var prog'' in
+                  
+                  F.dbgf "BtoF" "|v|:%d  < %a >" (B.S.cardinal fv) (F.fstrL E.fstr ",") (B.S.elements fv);
+                  
+                  let params', args, _, _, vars'' =
+                    B.S.fold (fun v (params, args, pre, post, vars) ->
+                        let vn, attr = E.decode v in
+                        if (!non_pattern || VR.mem vn vars) && not (E.is_global v) then(
+                          F.dbgf "BtoF" "-----------***-------------";
+                          if B.S.mem v mv && not (E.is_ptr v) then(
+                            F.dbgf "BtoF" "----------------------------- v: %a" E.fstr v;
+                            let attr' = E.PTR::attr in
+                            let param = B.var vn attr' in
+                            let params' = param::params in
+                            let arg = B._T @@ E.ADDR v in
+                            let args' = arg::args in
+                            let vars' = VR.add vn attr' @@ VR.remove vn vars in
+                            (params', args', pre, post, vars')
+                          )else
+                            let params' = v::params in
+                            let args' = _T v::args in
+                            (params', args', pre, post, vars)
+                        )else
+                          (params, args, pre, post, vars)
+                      ) fv ([],[],[],[],vars') in
+                  
+                  F.dbgf "BtoF" "Print the block %s" s_name;
+                  F.pf_s "BtoF" (B.pprint 0) prog'';
+                  let prog = B.adjust_ptr vars'' prog'' in
+                  F.pf_s "BtoF" (B.pprint 0) prog;
+                  
+                  let e_name = B.var fs_name [] in
+                  let params = if !non_pattern then
+                                 B.var "src_blk" [] ::params'
+                               else
+                                 params'
+                  in
+                  F.dbgf "BtoF" "|args|:%d  < %a >" (List.length args) (F.fstrL T.fstr ",") (args);
+                  let p = Procedure.mk_procedure e_name params prog in
+                  Procedure.pprint p; 
+                  F.iterS (fun (_,_,p) -> Procedure.pprint p) "----\n" !aux_funcs;
+                  (* let f_aux_funcs = if VR.mem fn !aux_funcs then VR.find fn !aux_funcs else VR.empty in *)
+                  F.dbgf "BtoF" "New Block Function: %s -> %s in %d " s_name fs_name i;
+                  (* let f_aux_funcs' = VR.add s_name (fs_name, args, p) f_aux_funcs in
+        aux_funcs := VR.add fn f_aux_funcs' (VR.remove fn !aux_funcs); *)
+                  
+                  if List.for_all (fun (f,_,_) -> not (f=fs_name)) !aux_funcs then
+                    begin
+                      if not (List.mem blk_name callstack) then
+                        aux_funcs := (fs_name, args, p)::!aux_funcs    
+                    end;
+                  F.dbgf "BtoFU" "Done block %d %s" i fs_name;
+                  args, Some (e_name, prog)
+                with
+              _ ->
+                  F.dbgf "BtoF" "Exception in block %d" i;
+                  [], None
+              end;    
+              (* make_block_func pkg (i+1) n *)
+            end 
+      end
+  
+and  to_while_t_blk  vars blk =
   let vars', ps = Llvm.fold_left_instrs
              (fun (_vars,acc) lli ->
-               let _vars', l = to_while_t_inst ~tl:true _vars lli in
-               (* B.pprint 2 l ; *)
+               F.dbgf "BtoFU" "--* %s" (stv lli);
+               let _vars', l = to_while_t_inst ~tl:true (0,[]) _vars lli in
                match l with
                  B.SKIP ->
                   _vars', acc
                | _ ->
                   _vars', acc @ [WPROG l]
-             (* acc @ [WINST lli] *)
              ) (vars,[])
              blk in
   let ps' = List.filter (function
@@ -1440,11 +1823,22 @@ and to_while_t_blk f vars blk =
               ) ps in
   match ps' with
     [] -> vars', WPROG B.SKIP
-  | _ when List.for_all (function WPROG B.SKIP -> true | _ -> false) ps -> vars, WPROG B.SKIP
+  | _ when List.for_all (function WPROG B.SKIP -> true | _ -> false) ps ->
+     vars,  WPROG B.SKIP
   | _ ->
      vars', WBLK ps
-;;
+ ;;
 
+ (*
+ let make_block_func  ((blk_arr, vars, f):pkg) i =
+  (* if i <= n then *)
+    begin
+      F.dbgf "BtoF" "Block: %d of %d" i (Array.length blk_arr);
+      let llbb = Array.get blk_arr (i) in
+      to_blk_funs vars llbb
+    end
+  *)
+ 
 let rec to_while_t_blks f vars i j blk_arr acc =
   let at_end vars acc =
     match acc with
@@ -1455,10 +1849,10 @@ let rec to_while_t_blks f vars i j blk_arr acc =
   in
   if i <= j then
     begin
-      
+      F.dbgf "DEB" "Block # %d" i;
       let llbb = Array.get blk_arr i in
       
-      let vars', p = to_while_t_blk f vars llbb in
+      let vars', p = to_while_t_blk vars llbb in
       
       match p with
         WPROG B.SKIP ->
@@ -1884,17 +2278,16 @@ let interruption_else v = function
   | _ -> B.SKIP
 ;;
 
-let enblock = function
-    B.BLOCK _ as p -> p
-  | p -> B.block p
-;;
+
 
 let rec make_block_func  ((blk_arr, vars, f):pkg) i =
   (* if i <= n then *)
     begin
-      F.dbgf "DEB" "Block: %d of %d" i (Array.length blk_arr);
+      F.dbgf "BtoF" "Block: %d of %d" i (Array.length blk_arr);
       let llbb = Array.get blk_arr (i) in
-      let vars', prog' = to_while_t_blk f vars llbb in
+      current_block := i;
+
+      let vars', prog' = to_while_t_blk vars llbb in
       let s_name = L.value_name @@ L.value_of_block llbb |> B.corr_id in
       let fn = L.value_name f in
       if s_name = "" then
@@ -1908,15 +2301,102 @@ let rec make_block_func  ((blk_arr, vars, f):pkg) i =
             try
               let prog'' = enblock @@ to_while_t prog' in
               let mv, fv = B.mod_free_var prog'' in
-              F.dbgf "LOOP" "----------------------------- v: %d" (B.S.cardinal fv);
+              F.dbgf "BtoF" "|v|:%d  < %a >" (B.S.cardinal fv) (F.fstrL E.fstr ",") (B.S.elements fv);
               
-              let params, args, _, _, vars'' =
+              let params', args, _, _, vars'' =
+                B.S.fold (fun v (params, args, pre, post, vars) ->
+                    let vn, attr = E.decode v in
+                    if !non_pattern || VR.mem vn vars then(
+                      F.dbgf "BtoF" "-----------***-------------";
+                      if B.S.mem v mv && not (E.is_ptr v) then(
+                        F.dbgf "BtoF" "----------------------------- v: %a" E.fstr v;
+                        let attr' = E.PTR::attr in
+                        let param = B.var vn attr' in
+                        let params' = param::params in
+                        let arg = B._T @@ E.ADDR v in
+                        let args' = arg::args in
+                        let vars' = VR.add vn attr' @@ VR.remove vn vars in
+                        (params', args', pre, post, vars')
+                      )else
+                        let params' = v::params in
+                        let args' = _T v::args in
+                        (params', args', pre, post, vars)
+                    )else
+                      (params, args, pre, post, vars)
+                  ) fv ([],[],[],[],vars') in
+              F.pf_s "BtoF2" (B.pprint 0) prog'';
+              let prog = B.adjust_ptr vars'' prog'' in
+              F.pf_s "BtoF2" (B.pprint 0) prog;
+              let fs_name = fn ^ s_name in
+              let e_name = B.var fs_name [] in
+              let params = if !non_pattern then
+                             B.var "src_blk" [] ::params'
+                           else
+                             params'
+              in
+              F.dbgf "BtoF" "|args|:%d  < %a >" (List.length args) (F.fstrL T.fstr ",") (args);
+              let p = Procedure.mk_procedure e_name params prog in
+              F.pf_s "BtoF" Procedure.pprint p;
+              (* let f_aux_funcs = if VR.mem fn !aux_funcs then VR.find fn !aux_funcs else VR.empty in *)
+              F.dbgf "BtoF" "New Block Function: %s -> %s in %d " s_name fs_name i;
+              (* let f_aux_funcs' = VR.add s_name (fs_name, args, p) f_aux_funcs in
+        aux_funcs := VR.add fn f_aux_funcs' (VR.remove fn !aux_funcs); *)
+              aux_funcs := (fs_name, args, p)::!aux_funcs;
+              F.dbgf "BtoF" "Done block %d" i
+            with
+              _ ->
+              F.dbgf "BtoF" "Exception in block %d" i;
+              ()
+          end;    
+          (* make_block_func pkg (i+1) n *)
+        end 
+    end
+;;
+
+let iterate f (i,n) =
+  for j=i to n do
+    f j
+  done
+
+let init_blk_to_idx blk_arr i n =
+  for j=i to n do
+    let blk = Array.get blk_arr j in
+    let bn = P.get_blk_name blk in
+    F.dbgf "BtoF" "%s->%d" bn j;
+    blk_to_idx := VR.add bn j !blk_to_idx
+  done
+;;
+
+let rec make_temp_block_func  ((blk_arr, vars, f):pkg) i =
+  (* if i <= n then *)
+  begin
+    F.pn "@@@@";
+    F.dbgf "BtoF" "Block: %d of %d" i (Array.length blk_arr);
+      let llbb = Array.get blk_arr (i) in
+      let vars', prog' = to_while_t_blk vars llbb in
+      let s_name = L.value_name @@ L.value_of_block llbb |> B.corr_id in
+      let fn = L.value_name f in
+      if s_name = "" then
+        begin
+          F.dbgf "WARNING" "Unnamed block found in function %s" fn;
+          None
+        end
+      else
+        begin
+          begin
+            try
+              current_block := i;
+              let prog'' = enblock @@ to_while_t prog' in
+              let mv, fv = B.mod_free_var prog'' in
+              F.dbgf "BtoF" "----------------------------- v: %d" (B.S.cardinal fv);
+              
+              let params', args, _, _, vars'' =
                 B.S.fold (fun v (params, args, pre, post, vars) ->
                     let vn, attr = E.decode v in
                     if VR.mem vn vars then(
-                      F.dbgf "LOOP" "-----------***-------------";
+                      F.dbgf "BtoF" "-----------***-------------";
                       if B.S.mem v mv && not (E.is_ptr v) then(
-                        F.dbgf "LOOP" "----------------------------- v: %a" E.fstr v;
+                        F.dbgf "BtoF" "----------------------------- v: %a" E.fstr v;
                         let attr' = E.PTR::attr in
                         let param = B.var vn attr' in
                         let params' = param::params in
@@ -1935,34 +2415,57 @@ let rec make_block_func  ((blk_arr, vars, f):pkg) i =
               
               let fs_name = fn ^ s_name in
               let e_name = B.var fs_name [] in
-
+              let params = if !non_pattern then
+                             B.var "src_blk" [] ::params'
+                           else
+                             params'
+              in
               let p = Procedure.mk_procedure e_name params prog in
               F.pf_s "FUNC" Procedure.pprint p;
               (* let f_aux_funcs = if VR.mem fn !aux_funcs then VR.find fn !aux_funcs else VR.empty in *)
-              F.dbgf "DEB" "New Block Function: %s -> %s in %d " s_name fs_name i;
+              F.dbgf "BtoF" "New Block Function: %s -> %s in %d " s_name fs_name i;
               (* let f_aux_funcs' = VR.add s_name (fs_name, args, p) f_aux_funcs in
         aux_funcs := VR.add fn f_aux_funcs' (VR.remove fn !aux_funcs); *)
-              aux_funcs := (fs_name, args, p)::!aux_funcs;
-              F.dbgf "DEB" "Done block %d" i
+              (* aux_funcs := (fs_name, args, p)::!aux_funcs; *)
+              F.dbgf "BtoF" "Done block %d" i;
+              Some (fs_name, args, p)
             with
               _ ->
-              F.dbgf "DEB" "Exception in block %d" i;
-              ()
+              F.dbgf "BtoF" "Exception in block %d" i;
+              None
           end;    
           (* make_block_func pkg (i+1) n *)
         end 
     end
 ;;
 
+(*
 let iterate f (i,n) =
+  let r = ref [] in
   for j=i to n do
-    f j
-  done
+    
+    r := !r @ [f j]
+  done;
+  !r
+ *)
+
+let adjust_parameters rs =
+  let rs_arr = Array.of_list rs in
+  Array.iter
+    (function None -> ()
+            | Some (fs_name, args, p) ->
+              () 
+    ) rs_arr
+;;
+
 
 let to_prog ((blk_arr, vars, f) as pkg:pkg) (k,n) =
   if !btf then
     begin
+      init_blk_to_idx blk_arr k n;
       iterate (make_block_func pkg) (k+1,n);
+      (* adjust_parameters rs; *)
+      current_block := k;
       let vars', prog = to_while_t_blks f vars k k blk_arr [] in
       vars', to_while_t prog
     end
@@ -1970,6 +2473,7 @@ let to_prog ((blk_arr, vars, f) as pkg:pkg) (k,n) =
     let vars', prog = to_while_t_blks f vars k n blk_arr [] in
     vars', to_while_t prog
 ;;
+
 
 let rec parse_interruptions ((blk_arr, vars, f) as dpkg) (seg:int * int) lblC lblEw =
   let r = parse_or dpkg [parse_break_then (lblEw, BRK);
@@ -2776,18 +3280,31 @@ let convert_struct =
     (F.corr_structname snm, e_flds, None)
     )
 
-let lbl_to_funcs pkg (i,n) =
-  to_prog pkg (i+0,n)
+let lbl_to_funcs (blk_arr, vars, f) n =
+  init_blk_to_idx blk_arr 0 n;
+  current_func := B.var (L.value_name f) [];
+  all_blks := VR.empty ;
+  let blk = Array.get blk_arr 0 in
+  F.dbgf "L2F" "lbl2funcs: %a" E.fstr !current_func;
+  let vars', prog = to_while_t_blk2 (0,[]) vars blk in
   
+  let p = B.join_progs prog in
+  F.pf_s "L2F" (B.pprint 2) p;
+  
+  vars', p
   
 let parse_func vars' name f =
   B.reset_declaration ();
+  blk_to_idx := VR.empty;
+  unnamed_param := VR.empty ;
+  
   let blk_arr = Llvm.basic_blocks f in
   
   current_func := name;
   F.dbgf "DEB" "Begin: %a" E.fstr name;
+  F.pf_s "LLVM" P.print_fun f;
+    
   let n = (Array.length blk_arr - 1) in
-  
   
   if n = -1 then
     vars', Procedure.mk_procedure name [] (enblock B.SKIP)
@@ -2795,30 +3312,46 @@ let parse_func vars' name f =
     begin
       let arr_prms = L.params f in
       let vars'', prms = Array.fold_left (fun (_vars, acc) a ->
-                             let _vars', a' = get_var _vars ~is_param:true a in
-                             B.add_to_declared a';
-                             _vars',  acc@[a']
+                             try
+                               let _vars', a' = get_var _vars ~is_param:true a in
+                               B.add_to_declared a';
+                               _vars',  acc@[a']
+                             with
+                               ARG ->
+                                F.pn (stv a);
+                                let fv = B.fresh_var [] in
+                                unnamed_param := VR.add (stv a) fv !unnamed_param; 
+                                _vars, acc@[fv]
+                             | e ->
+                                raise e
                            ) (vars',[]) arr_prms  in
       let vars'3 = VR.add continue [] @@ VR.add break [] vars'' in
       let pkg : pkg = (blk_arr, vars'3, f) in
-      let vars'3, b = (* parse_program pkg (0, n) in *) lbl_to_funcs pkg (0,n) in
-      let structs = List.fold_left (fun ss ((snm,flds) as s) -> VR.add (F.corr_structname snm) (convert_struct s) ss) VR.empty !structures in
-
-      let b =
-        if !btf then
-          B.adjust_calls !aux_funcs b
+      
+      let vars'3, b =
+        if !non_pattern then
+          lbl_to_funcs pkg n
         else
-          b
+          parse_program pkg (0, n) in
+      let structs = List.fold_left (fun ss ((snm,flds) as s) -> VR.add (F.corr_structname snm) (convert_struct s) ss) VR.empty !structures in      
+      let b, aux_fs =
+        if !btf then
+          (* B.adjust_calls !aux_funcs b *)
+          b, (* List.sort_uniq (fun (a,_,_) (b,_,_) -> String.compare a b) *) !aux_funcs
+        else
+          b, !aux_funcs
       in
+      aux_funcs := aux_fs;
+      
       let _, b' = B.restore_prog structs b in
+      
       let p = Procedure.mk_procedure name prms (enblock b') in
       F.dbgf "DEB" "End: %a" E.fstr name;
+      
       vars'3, p
     end
   
 ;;
-
-
 
 let translate_structures gs =
   let g_structures : G.t list =
@@ -2901,7 +3434,7 @@ let translate file =
                        if E.var_decode name = !one_func then 
                          try
                            let _vars',f' = parse_func vars' name f in
-                           F.dbgf "PROGRESS" "%d. *** succeeded: %a" i E.fstr name;
+                           F.dbgf "PROGRESS" "%d. *** succeeded ***: %a" i E.fstr name;
                            _vars', acc @[f'], i+1
                          with
                            _ ->
@@ -2915,6 +3448,7 @@ let translate file =
                      else
                        begin
                          try
+                           F.dbgf "TRYING" "%d. *** trying: %a" i E.fstr name;
                            let _vars',f' = parse_func vars' name f in
                            F.dbgf "PROGRESS" "%d. *** succeeded: %a" i E.fstr name;
                            _vars', acc @[f'], i+1
@@ -2932,7 +3466,7 @@ let translate file =
   let gs2   = List.map (fun (func_name, params, body) ->
                   write_func func_name file params body) fs' in
   let gs3 = gs1 @ gs2 in
-  F.pn ("Total number of functions: " ^ (string_of_int @@ List.length gs3));
+  F.pn ("Total number of functions: " ^ (string_of_int @@ List.length gs2));
   F.pf_s "AUX" (F.iterS (function G.FFILE (_,s) -> F.p s | _ -> ()
                   ) "\n") gs3; 
   let gs    = translate_structures gs3 in

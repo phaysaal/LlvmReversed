@@ -11,14 +11,18 @@ module G = Global
 module DM = Map.Make(String)
 module S_E = Set.Make(E);;
 module S_S = Set.Make(String);;
+module M_S = Map.Make(String);;
+module M_I = Map.Make(Int);;
 
 exception NotSupported of string
 exception Supported of string
 exception Unexpected of string
-                     
+                      
 let ldp = Lexing.dummy_pos ;;
 let dp = (0,ldp) ;; 
 let unit = C.Unit (dp) ;;
+let show_not_found_function = ref false;;
+
 let mk_val v = C.Value (dp, v) ;;
 let mk_num n = mk_val (C.(`OInt n)) ;; 
 
@@ -26,6 +30,7 @@ let to_list s = S_E.fold (fun e l -> e::l) s [] ;;
 
 let procedures : (Procedure.t list) ref = ref [] ;;
 let structs = ref [] ;;
+
               
 let string_of_op = function
 	| V.Op.ADD -> "+"
@@ -338,15 +343,27 @@ let rec bexp_to_ifcond ptrs vs b : [ `Var of string | `BinOp of C.lhs * string *
   | B.OP (B.UNIT (a, V.Op.LE, b), V.Op.OR, B.UNIT (a', V.Op.EQ, b'))
     | B.OP (B.UNIT (a, V.Op.EQ, b), V.Op.OR, B.UNIT (a', V.Op.LE, b')) when a=a' && b=b' ->
      C.(`BinOp (term_to_lhs ptrs vs a, "<=", term_to_lhs ptrs vs b))
-    | B.OP (b1, V.Op.OR, b2) ->
+  | B.OP (b1, V.Op.OR, b2) ->
      let l1  = bexp_to_ifcond ptrs vs b1 in
      let l1' = to_lhs l1 in
      let l2  = bexp_to_ifcond ptrs vs b2 in
      let l2' = to_lhs l2 in
      C.(`BinOp (l1', "||", l2'))
-    | _ ->
+  | B.OP (b1, V.Op.XOR, b2) -> (* x ^ y = !x&y || x&!y *)
+     let b1c = B.complement b1 in
+     let b2c = B.complement b2 in
+     let l1  = bexp_to_ifcond ptrs vs b1 in
+     let l1' = to_lhs l1 in
+     let l2  = bexp_to_ifcond ptrs vs b2 in
+     let l2' = to_lhs l2 in
+     let l1c  = bexp_to_ifcond ptrs vs b1c in
+     let l1'c = to_lhs l1c in
+     let l2c  = bexp_to_ifcond ptrs vs b2c in
+     let l2'c = to_lhs l2c in
+     C.(`BinOp (`BinOp (l1'c,"&&",l2'), "||", `BinOp (l1',"&&",l2'c)))
+  | _ ->
      B.pprint b; F.pn "";
-     raise (NotSupported "bexp_to_ifcond")
+     raise (NotSupported "bexp_to_ifcond (1)")
 ;;
 
 let rec mk_cond ptrs vs thenbody elsebody cond =
@@ -360,9 +377,19 @@ let rec mk_cond ptrs vs thenbody elsebody cond =
      C.Cond (dp, bexp_to_ifcond ptrs vs cond, thenbody, elsebody)
   | B.OP (b1, V.Op.OR, b2) ->
      C.Cond (dp, bexp_to_ifcond ptrs vs b1, thenbody, mk_cond ptrs vs thenbody elsebody b2)
+  | B.OP (b1, V.Op.XOR, b2) ->
+     let c1 = bexp_to_ifcond ptrs vs b1 in
+     let c2 = bexp_to_ifcond ptrs vs b2 in
+     (* if c1 then
+          (if c2 then F else T)
+        else
+          (if c2 then T else F)  *)
+     let cp1 = C.Cond (dp, c2, elsebody, thenbody) in
+     let cp2 = C.Cond (dp, c2, thenbody, elsebody) in
+     C.Cond (dp, c1, cp1, cp2)
   | _ ->
      B.pprint cond; F.pn "";
-     raise (NotSupported "bexp_to_ifcond")
+     raise (NotSupported "bexp_to_ifcond (2)")
 ;;
 
 let is_declared declared a = S_E.mem a declared ;;
@@ -879,47 +906,63 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
               y, _) ->
      S_E.empty, S_E.empty, [], C.Assert (dp, bexp_to_relation vs (B.UNIT(T.zero, V.Op.NE, T.zero)))
   | PROCCALL (z, a, b, i, y, l) ->
-     
-     let addrs' = (List.map T.toExp b)
-                  |> S_E.of_list
-                  |> S_E.filter (function E.ADDR _ -> true | _ -> false) 
-                  |> S_E.map (function E.ADDR x -> x | x -> x) in
-     let addrs = S_E.map (E.var_add E.PTR) addrs' in
-     let vs' = S_E.filter (fun v -> not (S_E.mem v addrs')) vs in
-     let vs'' = match z with
-         None -> vs'
-       | Some x ->
-          enptr x vs'
-     in
-     let vs'3 = S_E.union vs'' addrs in
-     (* print_vars (PROCCALL (z, a, b, i, S.SKIP, l)) vs; *)
-     let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs'3) y in
-     let gvs = try DM.find (string_of_tvar a) dep_map with _ -> S_E.empty in
-     let lgvs = to_list gvs in
-     let lhs_gvs = List.map (exp_to_lhs ~arg_mode:true ptrs vs) lgvs in
-     let (_, params, _) = try List.find (fun (pn,_,_) -> pn=T.toExp a) !procedures with e -> F.pn ("Not found function: " ^ T.toStr a); raise e in
-     let vparams = List.map var_of_assignee params in
-     
-     let par_arg = List.combine b vparams in
-     let args' = List.map (fun (a, p) ->
-                     term_to_lhs ~arg_mode:(E.is_ptr p) ptrs vs a
-                   ) par_arg in 
-     let all_args = args' @ lhs_gvs in
-     let ptrs', p, declared =
-       match z with
-         None ->
-         ptrs, C.(Seq (ldp,
-                 Value (dp,
-                         `Call (string_of_tvar a, List.length b, all_args)),
-                 y')), declared
-       | Some z' ->
-          (* let y', declared = fix_shadowing declared z' y' in *)
-          S_E.add z' ptrs, C.(Seq (ldp, Assign (dp, string_of_evar z', `Call (string_of_tvar a, List.length b, all_args)), y')), declared
-     in
-     (S_E.union ptrs' addrs,
-      declared,
-      ry,
-      p)
+     begin
+       let addrs' = (List.map T.toExp b)
+                    |> S_E.of_list
+                    |> S_E.filter (function E.ADDR _ -> true | _ -> false) 
+                    |> S_E.map (function E.ADDR x -> x | x -> x) in
+       let addrs = S_E.map (E.var_add E.PTR) addrs' in
+       let vs' = S_E.filter (fun v -> not (S_E.mem v addrs')) vs in
+       let vs'' = match z with
+           None -> vs'
+         | Some x ->
+            enptr x vs'
+       in
+       let vs'3 = S_E.union vs'' addrs in
+       (* print_vars (PROCCALL (z, a, b, i, S.SKIP, l)) vs; *)
+       let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs'3) y in
+       let gvs = try DM.find (string_of_tvar a) dep_map with _ -> S_E.empty in
+       let lgvs = to_list gvs in
+       let lhs_gvs = List.map (exp_to_lhs ~arg_mode:true ptrs vs) lgvs in
+       try
+         let (_, params, _) =
+           try
+             List.find (fun (pn,_,_) -> E.var_decode pn=F.corr_filename @@ (E.var_decode @@ T.toExp a)) !procedures
+           with e ->
+                 if !show_not_found_function then
+                   F.pn ("Not found function: " ^ T.toStr a);
+                 raise e
+         in
+         let vparams = List.map var_of_assignee params in
+         
+         let par_arg = List.combine b vparams in
+         let args' = List.map (fun (a, p) ->
+                         term_to_lhs ~arg_mode:(E.is_ptr p) ptrs vs a
+                       ) par_arg in 
+         let all_args = args' @ lhs_gvs in
+         let ptrs', p, declared =
+           match z with
+             None ->
+              ptrs, C.(Seq (ldp,
+                            Value (dp,
+                                   `Call (string_of_tvar a, List.length b, all_args)),
+                            y')), declared
+           | Some z' ->
+              (* let y', declared = fix_shadowing declared z' y' in *)
+              S_E.add z' ptrs, C.(Seq (ldp, Assign (dp, string_of_evar z', `Call (string_of_tvar a, List.length b, all_args)), y')), declared
+         in
+         (S_E.union ptrs' addrs,
+          declared,
+          ry,
+          p)
+       with
+         Not_found ->
+          (ptrs,
+          declared,
+          ry,
+          y')
+       | e -> raise e
+     end
   | MALLOC (a, size, y, l) ->
      if E.is_array a then
        begin
@@ -1111,7 +1154,7 @@ let string_of_globals = function
   | _ -> raise (NotSupported "string of globals")
 
 let func_to_fn dep_map (nm, params, body) =
-  F.dbgf "SC" "Begin: %a" E.fstr nm;
+  F.dbgf "SC_FUN" "Begin: %a" E.fstr nm;
   let snm = string_of_evar nm in
   let gvars' = DM.find snm dep_map in
   let gvars = S_E.map (E.var_add E.PTR) gvars' in
@@ -1119,7 +1162,7 @@ let func_to_fn dep_map (nm, params, body) =
   let ptrs, _, fns, exp = body_to_cexp (dep_map, gvars, S_E.union gvars (S_E.of_list vparams)) body in
   let sparams = List.map string_of_evar vparams in
   let l_glo_dep = to_list gvars |> List.map string_of_evar in
-  F.dbgf "SC" "Done: %a" E.fstr nm;
+  F.dbgf "SC_FUN" "Done: %a" E.fstr nm;
   fns @ [(snm, sparams@l_glo_dep, exp)]
 ;;
 
@@ -1150,8 +1193,40 @@ let rec slacC_to_prog dep_map acc = function
   | _::xs -> slacC_to_prog dep_map acc xs
 ;;
 
+let slacC_to_prog dep_map acc funs =
+  let len = List.length funs in
+  let progs : ('a*'b*'c) list ref = ref [] in
+  for i=0 to len-1 do
+    let x = List.nth funs i in
+    match x with
+    | G.PROC ((_,_,S.SKIP),_,_,_,_)
+      | G.PROC ((_,_,S.BLOCK(S.SKIP,S.SKIP,_)),_,_,_,_)
+      ->
+       ()
+    | G.PROC (proc,_,_,_,_) ->
+       let prog = func_to_fn dep_map proc in
+       progs := prog @ !progs
+    | G.FFILE (st,_) ->
+       (* begin
+         let fin = open_in st in
+         let pd : G.t = Marshal.from_channel fin in
+         close_in fin;
+         match pd with
+         | G.PROC (proc,_,_,_,_) ->
+            let prog = func_to_fn dep_map proc in
+            progs := prog @ !progs
+         | _ -> ()
+       end *)
+       raise (Unexpected "FFILE")
+    | _ -> ()
+  done;
+  !progs
+;;
+
 
 let rec get_func_global_dep_fn progs dep_map fn body =
+  let sfn = string_of_evar fn in
+  F.pn ("DepMap | " ^ sfn);
   let sfn = string_of_evar fn in
   if DM.mem sfn dep_map then
     dep_map, DM.find sfn dep_map
@@ -1183,17 +1258,126 @@ let rec get_func_global_dep progs dep_map = function
     | (fn, params, S.BLOCK (S.SKIP, S.SKIP, _))::xs ->
      get_func_global_dep progs dep_map xs
   | (fn, params, body)::xs ->
-     if DM.mem (string_of_evar fn) dep_map then
+     let sfn = string_of_evar fn in
+     
+     if DM.mem sfn dep_map then
        get_func_global_dep progs dep_map xs
      else
        let dep_map', _ = get_func_global_dep_fn progs dep_map fn body in
        get_func_global_dep progs dep_map' xs
 ;;
 
+module Pair = struct
+  type t = int * string
+  let compare (i,a) (j,b) = if i=j then String.compare a b else i-j
+end
+            
+let rec get_func_global_dep3 progs dep_map glos =
+  let funcs',all =
+    List.fold_left
+      (fun (acc,all) -> (function (_, _, S.SKIP) -> (acc,all)
+                          | (_, _, S.BLOCK (S.SKIP, S.SKIP, _)) -> (acc,all)
+                          | (fn, params, body) ->
+                             let procs : S_S.t = S.get_func_call body |> S_S.filter (fun f -> is_not_removable f) in
+                             let sfn = string_of_evar fn in
+                             let _, fv = S.mod_free_var body in
+                             let gfv : S_E.t = S_E.filter E.is_global fv in
+                             
+                             (M_S.add sfn (procs,gfv) acc, S_S.add sfn (S_S.union procs all))
+      )) (M_S.empty,S_S.empty) glos in
+  F.dbgf "SC-ARR" "|all|: %d, |funcs|: %d" (S_S.cardinal all) (M_S.cardinal funcs');
+  let _,idx = S_S.fold (fun f (i,acc) -> (i+1,M_S.add f i acc)) all (0, M_S.empty) in 
+  let module S_P = Set.Make(Pair) in
+  let funcs : (S_P.t * S_E.t) M_S.t  =
+    M_S.map
+      (fun (procs,gfv) ->
+        let procs' =
+          S_S.fold
+            (fun p acc ->
+              try
+                S_P.add (M_S.find p idx, p) acc
+              with
+                Not_found ->              
+                acc
+            ) procs S_P.empty in
+        procs', gfv
+      ) funcs' in
+  
+  let funcs' : (S_P.t * S_E.t) M_S.t =
+    M_S.fold
+      (fun _ _ (funcs': ((S_P.t * S_E.t)) M_S.t) ->
+        let funcs'' :(S_P.t * S_E.t) M_S.t =
+          M_S.map (fun ((procs : S_P.t), gfv) ->
+              let procs', gfv' =
+                S_P.fold (fun (_,p) (acc, gfv) ->
+                    if M_S.mem p funcs then
+                      let (procs, gfv') = M_S.find p funcs in 
+                      S_P.union acc procs, S_E.union gfv gfv'
+                    else
+                      acc, gfv
+                  ) procs (procs, gfv) in
+              
+              procs', gfv'
+            ) funcs' in
+        funcs''
+      ) funcs funcs
+  in
+  F.pf_s "SC-ARR" (
+  M_S.iter (fun f (procs,_) ->
+      S_P.iter (fun (_,j) -> F.dbgf "SC-ARR" "%s --> %s" f j) procs
+    )) funcs' ;
+  let dep_map = M_S.map snd funcs' in
+  dep_map ;;
+  
+let rec get_func_global_dep2 progs dep_map glos =
+  let _, funcs, idx =
+    List.fold_left
+      (fun (i,acc,idx) -> (function (_, _, S.SKIP) -> (i,acc,idx)
+                          | (_, _, S.BLOCK (S.SKIP, S.SKIP, _)) -> (i,acc,idx)
+                          | (fn, params, body) ->
+                             let procs : S_S.t = S.get_func_call body |> S_S.filter (fun f -> is_not_removable f) in
+                             let sfn = string_of_evar fn in
+                             (i+1, M_S.add sfn (i,procs) acc, M_I.add i (sfn,procs) idx)
+      )) (0,M_S.empty,M_I.empty) glos in
+  let n = M_S.cardinal funcs in
+  let mat = (Array.make_matrix n n 0) in
+  let get i j = Array.get (Array.get mat i) j in
+  let set i j x =
+    let mat2 = Array.get mat i in
+    Array.set mat2 j x;
+    Array.set mat  i mat2 in
+  for i=0 to n-1 do
+    for j=0 to n-1 do
+      let fi, fns = M_I.find i idx in
+      let fj, _ = M_I.find i idx in
+      if S_S.mem fj fns then
+        begin
+          set i j 1
+        end
+    done
+  done;
+  for k=0 to n-1 do
+    for i=0 to n-1 do
+      for j=0 to n-1 do
+        let xik = get i k in
+        let xkj = get k j in
+        if xik > 0 && xkj > 0 then
+          set i j (xik+xkj)
+      done
+    done
+  done;  
+  for i=0 to n-1 do
+    for j=0 to n-1 do
+      let x = (Array.get (Array.get mat i) j) in
+      if x>0 then
+        F.dbgf "SC-ARR" "%d,%d --> %d" i j x; 
+   done
+  done;
+  ()
 
 let slac_to_consort progs =
+  F.pn "";
   structs := List.fold_left (fun acc -> (function G.STRUCT (a,_) -> a::acc | _ -> acc)) [] progs;
-  
   let funs = List.filter
                (function
                 | G.PROC ((_,_,S.SKIP),_,_,_,_)
@@ -1223,8 +1407,12 @@ let slac_to_consort progs =
                          | _ -> acc
       ) [] funs in
   procedures := procs;
-  
-  let dep_map = get_func_global_dep procs DM.empty procs in
+
+  (*
+  get_func_global_dep3 procs DM.empty procs;
+  raise (Unexpected ""); *)
+  let dep_map = get_func_global_dep3 procs DM.empty procs in
+  F.pn "dep map is finished";
   let fns = slacC_to_prog dep_map [] funs in
   let is_main_exists = List.exists (function ("main",_,_) -> true | _ -> false) fns in
   let main, gvs =
