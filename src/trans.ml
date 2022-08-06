@@ -105,7 +105,7 @@ let get_structures () =
         let attr = Types.get_types fld in
         (E.VAR (string_of_int i, attr), T.NULL)) flds
   in
-  let find_rec_fld _ = None in (** Need to implement for List, Tree, etc. data structure *)
+  let find_rec_fld _ = None in (* TODO: Need to implement for List, Tree, etc. data structure *)
   let structures = List.fold_left (fun acc (s, flds) ->
                        let flds' = convert_fields flds in
                        let rec_fld = find_rec_fld flds' in
@@ -236,7 +236,6 @@ let is_ptr_element lli =
   | VK.ConstantExpr ->
      true
   | VK.Instruction opcode ->
-     (* let opcode = (try L.instr_opcode lli with _ -> raise (OPC "@is_ptr_element")) in *)
      opcode = O.GetElementPtr
   | _ -> raise (OPC "@is_ptr_element")
 ;;
@@ -374,15 +373,8 @@ and get_ptr_element vars lli =
       let arr = L.operand lli 0 in
       let _, e_arr = get_var vars arr in
       F.dbgf "GEP" "arr: %s {(%a)}" (stv arr) E.fstr e_arr;
-      (* let arr0 = L.operand arr 0 in *)
       let ty = L.type_of arr in
       let tp = ty |> L.classify_type in
-      (* F.pn (stv lli);
-      F.pn (stv arr);
-      P.print_type (L.type_of arr);
-      F.pn (stv arr0);
-      P.print_type ty;
-       *)
       if is_array ty then
         begin
           F.dbgf "GEP" "Array in GEP";
@@ -501,20 +493,17 @@ and get_var vars ?(is_global=false) ?(is_param=false) ?(is_local=false) ?(addr=f
 ;;
 
 let details vars lli =
-  F.dbgf "DET" "++++++++++++";
-  F.dbgf "DET" "inst: %s" (stv lli);
-  F.dbgf "DET" "|op|: %d" (L.num_operands lli);
+  F.dbgf "DET" "++++++++++++\ninst: %s\n|op|: %d" (stv lli) (L.num_operands lli);
   let tp = L.type_of lli in
   F.pf_s "DET" P.print_type tp;
   
-  F.dbgf "DET" "type: %s" (L.string_of_lltype tp);
-  F.dbgf "DET" "typ_class: %s" (P.string_of_type tp);
+  F.dbgf "DET" "type: %s | typ_class: %s" (L.string_of_lltype tp) (P.string_of_type tp);
   begin
     match get_array_type tp with
     Some tp ->
-    F.dbgf "DET" "Array type of length %d" (L.array_length tp)
-  | None ->
-     F.dbgf "DET" "Not an Array type"
+     F.dbgf "DET" "Array type of length %d" (L.array_length tp)
+    | None ->
+       F.dbgf "DET" "Not an Array type"
   end;
   begin
     match get_constant lli with
@@ -552,26 +541,8 @@ let mk_i_pred e_arg1 e_arg2 = function
 ;;
 
 let mk_f_pred e_arg1 e_arg2 = function
-  (*  L.Fcmp.Slt
-  |  L.Icmp.Ult ->
-      BX.UNIT (B._T e_arg1, V.Op.LE, B._T e_arg2)
-  |  L.Icmp.Sgt
-     |  L.Icmp.Ugt ->
-      BX.UNIT (B._T e_arg2, V.Op.LE, B._T e_arg1)
-  |  L.Icmp.Sle
-     |  L.Icmp.Ule ->
-      BX.OP (
-          BX.UNIT (B._T e_arg1, V.Op.LE, B._T e_arg2), V.Op.OR,
-          BX.UNIT (B._T e_arg1, V.Op.EQ, B._T e_arg2))
-  |  L.Icmp.Sge
-     |  L.Icmp.Uge ->
-      BX.OP (
-          BX.UNIT (B._T e_arg2, V.Op.LE, B._T e_arg1), V.Op.OR,
-          BX.UNIT (B._T e_arg2, V.Op.EQ, B._T e_arg1)) *)
   |  L.Fcmp.Oeq ->
       BX.UNIT (B._T e_arg1, V.Op.EQ, B._T e_arg2)
-  (* |  L.Icmp.Ne ->
-      BX.UNIT (B._T e_arg2, V.Op.NE, B._T e_arg1) *)
   | _ -> raise (Err "Not compatible yet.")              
 ;;
 
@@ -666,9 +637,6 @@ let is_indirect lli =
   | VK.ConstantExpr ->
      false
   | VK.Instruction opcode ->
-      (* let opcode = (try L.instr_opcode lli with _ ->
-                  pf "         %s" (stv lli);
-                  raise (OPC "is_indirect")) in *)
       opcode = O.Load && is_pointer lli
   | _ ->
      pf "         %s" (stv lli);
@@ -805,9 +773,7 @@ let mk_assign_maybe vars lli o =
     | O.Mul ->
        bin V.Op.MUL
     | O.SDiv ->
-       
        let p = bin V.Op.DIV in
-       (* B.pprint 0 p; *)
        p
     | O.Or
       | O.And
@@ -958,7 +924,6 @@ let rec to_while_t_inst vars lli =
                  else
                    begin
                      F.dbgf "DEB1" "Non-Array";
-                     (* let vars', v = get_var vars ~is_local:true lli in *)
                      let r = B.decl v 1 in
                      vars', add_ps ps r
                    end
@@ -1019,7 +984,7 @@ let rec to_while_t_inst vars lli =
          end
     |	GetElementPtr ->
        let vn = L.value_name lli in
-       if vn = "" (* || not (VR.mem vn vars) *) then (** 6/16: || not (VR.mem vn vars) *)
+       if vn = "" then
          begin
            F.dbgf "GEP" "vn is '' or vn not in vars";
            vars, B.SKIP
@@ -1221,13 +1186,11 @@ and to_while_t_blk f vars blk =
   let vars', ps = Llvm.fold_left_instrs
              (fun (_vars,acc) lli ->
                let _vars', l = to_while_t_inst _vars lli in
-               (* B.pprint 2 l ; *)
                match l with
                  B.SKIP ->
                   _vars', acc
                | _ ->
                   _vars', acc @ [WPROG l]
-             (* acc @ [WINST lli] *)
              ) (vars,[])
              blk in
   let ps' = List.filter (function
@@ -1525,11 +1488,9 @@ let parse_break (lblEw, sg) (blk_arr,_,_) ((i,n) as seg) =
     F.dbgf "INTRP" "Parse Break:: checking Label %s in %d" lblEn (fst rest_seg);
     next_lbl_is blk_arr lblEn rest_seg;
     
-    (* F.dbgf "INTRP" "Parse Break:: checking BR %s in %d" lblC (j);
-    let (rest_seg, inst3) = next_br_is blk_arr lblC then_seg in *)
     F.dbgf "INTRP" "Parse Break:: Passed";
     
-    let dl_instr = [inst1;inst2(* ;inst3 *)] in
+    let dl_instr = [inst1;inst2] in
     Some (sg, B.var (get_intrp_v sg) [], dl_instr, _A, pre_seg::then_seg::(1,0)::rest_seg::[])
   with Not_parsed -> None  
 ;;
@@ -1566,11 +1527,8 @@ let parse_break_then (lblEw, sg) (blk_arr,_,_) ((i,n) as seg) =
         Some (inst5, j') ->
          let else_seg = (j,j'-1) in
          let rest_seg = (j',n) in
-         (* F.dbgf "INTRP" "Parse Break Then:: checking BR %s in %d" lblC (j');
-         let (rest_seg, inst3) = next_br_is blk_arr lblC (j',n) in
-          *)
          F.dbgf "INTRP" "Parse Break Then:: Passed";
-         let dl_instr = [inst1;inst2;(* inst3; *)inst5] in
+         let dl_instr = [inst1;inst2;inst5] in
          Some (sg, B.var (get_intrp_v sg) [], dl_instr, _A, pre_seg::then_seg::else_seg::rest_seg::[])
       | None -> None
     end
@@ -1835,8 +1793,8 @@ and parse_while (blk_arr, vars, f) (pre_seg, (inst0,lblC), (i,n)) =
   
 and parse_loop ((blk_arr, vars, f) as dpkg) (init_seg, (i,n)) =
   F.dbgf "LOOP" "Parse Loop:: init_seg:(%d,%d), (i,n):(%d,%d)" (fst init_seg) (snd init_seg) i n;
-  let (inst1, lblBC) = br_at_end blk_arr i in  (** br label %do.body *)
-  next_lbl_is blk_arr lblBC (i+1, n);          (** do.body: *)
+  let (inst1, lblBC) = br_at_end blk_arr i in
+  next_lbl_is blk_arr lblBC (i+1, n);
   F.dbgf "LOOP" "B/C:%s" lblBC;
   let r = parse_or dpkg [parse_do; parse_while] (Some (init_seg, (inst1,lblBC), (i+1,n))) in
   F.dbgf "LOOP" "Parse Loop:: Passed";
@@ -1988,9 +1946,8 @@ and parse_phi ((blk_arr, vars, f) as dpkg) (pre_seg, is_negative, (i',n), inst1,
          phis := !phis @ [(phi_instr, bexp)];
          let vars',_WP1 = to_prog dpkg (fst pre_seg, i+1) in
          F.dbgf "PHI" "phi(WP1): (%d,%d)" (fst pre_seg) (i+1);
-         let l = i+2 in
-         let vars'', _WP3 = parse_program (blk_arr, vars', f) (l, n) in
-         F.dbgf "PHI" "phi(WP3): (%d,%d)" l n;
+         let vars'', _WP3 = parse_program (blk_arr, vars', f) (j, n) in
+         F.dbgf "PHI" "phi(WP3): (%d,%d)" j n;
          let _WP = B.block @@ B.join_progs (ps@ps1@[_WP1; _WP3]) in
          F.dbgf "PHI" "phi Done.";
          Some (vars'', _WP)
@@ -2153,8 +2110,7 @@ let translate_global vars g =
 
 
 let translate file =
-  (* V.Options.show_types := true; *)
-  F.p_opt := []; (*  ["FUNC";"PHI";"IF";"LOOP";"INTRP"] ;  *)
+  F.p_opt := [];
   F.pn_s "PRO" ("Translating " ^ file);
   
   let llctx = Llvm.global_context () in
@@ -2166,9 +2122,6 @@ let translate file =
                          _vars', acc @ [g']) (VR.empty,[]) llm in
   F.pn_s "DEB" "Globals are translated";
 
-  (* Printf.printf "*** basic blocks/instructions ***\n" ;
-  (* Llvm.iter_functions Print.print_fun llm ; *)
-  Printf.printf "*** Translation ***\n" ; *)
   let _, fs = L.fold_left_functions (fun (_vars, acc) f ->
                   let _vars',f' = parse_func vars' f in
                   _vars', acc @[f']) (vars',[]) llm  in
@@ -2176,5 +2129,4 @@ let translate file =
   let gs2   = List.map (fun (func_name, params, body) ->
                   write_func func_name file params body) fs in
   let gs    = translate_structures (gs1@gs2) in
-  (* List.iter (fun g -> Global.pprint g) gs; *)
   gs
