@@ -36,6 +36,7 @@ type t =
 
 let noop = ref false
 
+
 let extra sl =
   match (String.length sl) with
   | 0 -> "       "
@@ -476,7 +477,7 @@ let reset_declaration () =
 let rec decl_all = function
     [] -> SKIP
   | x::xs ->
-     if List.mem x !declared then
+     if List.mem x !declared || E.is_param x then
        decl_all xs
      else
        let p = decl x 1 in
@@ -539,8 +540,14 @@ let block b =
     BLOCK (b, SKIP, dl)
 ;;
 
+let enblock = function
+    BLOCK _ as p -> p
+  | p -> block p
+;;
+
+
 let mk_if c p1 p2 =
-  IF (c, p1, p2, SKIP, dl)
+  IF (c, enblock p1, enblock p2, SKIP, dl)
 ;;
 
 let mk_assert b =
@@ -548,7 +555,7 @@ let mk_assert b =
 ;;
 
 let mk_while b p =
-  WHILE (b, [], p, F.empty, SKIP, dl)
+  WHILE (b, [], enblock p, F.empty, SKIP, dl)
 ;;
 
 let rec join_progs = function
@@ -664,16 +671,27 @@ let restore_prog structures p =
        addfv r (F.fv (List.hd a)),  ASSERT (a, y', l)
     | DECL (x, d1, d2,
             IF (a,
-                (ASSIGN(x1, T.EXP (E.CONST 1),SKIP,_) as p1),
-                (ASSIGN(x2, T.EXP (E.CONST 0),SKIP,_) as p2),
+                BLOCK ((ASSIGN(x1, T.EXP (E.CONST 1),SKIP,_) as p1), SKIP, _),
+                BLOCK ((ASSIGN(x2, T.EXP (E.CONST 0),SKIP,_) as p2), SKIP, _),
                 y, l),d3) when x1=x2 && x=x1 ->
-       let (r, s), y' = restore_prog locals y in
-       
-       (* if E.is_global x1 || E.is_param x1 || S.mem x1 s then *)
-         let s' = S.add x s in
-         (r, addfvs s' (B.fv a)), DECL (x, d1, d2, IF (a, p1, p2, y', l), d3)
-       (* else
-         (r,s), y' *)
+       begin match y with
+         WHILE (b, _, _, _, _, _) |
+         IF (b, _, _, _, _) |
+           ASSERT ((_,b::_,_,_)::_, _, _)  when a=b ->  
+          let (r, s), y' = restore_prog locals y in
+          
+          if E.is_global x1 || E.is_param x1 || S.mem x1 s then
+            let s' = S.add x s in
+            (r, addfvs s' (B.fv a)), DECL (x, d1, d2, IF (a, p1, p2, y', l), d3)
+          else
+            (r,s), y'
+         | _ ->
+            let (r, s), y' = restore_prog locals y in
+          
+            let s' = S.add x s in
+            (r, addfvs s' (B.fv a)), DECL (x, d1, d2, IF (a, p1, p2, y', l), d3)
+            
+       end
     | IF (a, b, c, y, l) ->
        (* let nn = !noop in
        noop := true; *)
@@ -755,12 +773,14 @@ let restore_prog structures p =
              (* else
                (r, s), y' *)
          in
-         
+
          if not !noop && init_data = INIT_E then
-           let is_not_in y = let _, fvs = mod_free_var y in
-                             not (S.mem a fvs) in
+           begin let is_not_in y = let _, fvs = mod_free_var y in
+                                   not (S.mem a fvs) in
+                 
            match y with
-             MALLOC (c1, tl,
+             
+           | MALLOC (c1, tl,
                      ASSIGN (p, c2, y, _), _) when a=c1 && c1=T.toExp c2 && is_not_in y ->
               let tl =
                 if E.is_struct p then
@@ -777,8 +797,8 @@ let restore_prog structures p =
               in
               restore_prog locals (MALLOC (p, tl, y, l))
            | IF (b,
-                 ASSIGN (c1, T.EXP(E.CONST 1), SKIP, _),
-                 ASSIGN (c2, T.EXP(E.CONST 0), SKIP, _),
+                 BLOCK (ASSIGN (c1, T.EXP(E.CONST 1), SKIP, _), SKIP, _),
+                 BLOCK (ASSIGN (c2, T.EXP(E.CONST 0), SKIP, _), SKIP, _),
                  DECL (cv'', _, INIT_E,
                        ASSIGN (cv', cp,
                                ASSERT ([(_,[B.UNIT (cv, Op.NE, T.EXP (E.CONST 0))],[],[])],
@@ -791,7 +811,7 @@ let restore_prog structures p =
               
               restore_prog locals (p)
            | _ ->
-              deal_decl ()
+              deal_decl () end
          else
            deal_decl ()
        end
@@ -917,89 +937,111 @@ let adjust_ptr vars p =
   adjust_ptr [] p
 
 
-let adjust_calls (aux_funcs:'a) p =
+let adjust_calls aux_calls fname p =
   let module VR = Map.Make(String) in
+  let dc = function
+      DECL (v, _, _, _, _) ->
+      v
+    | _ -> raise Not_found
+  in
   
-  let rec adjust_calls p =
+  let rec adjust_calls d p =
     match p with
     | SKIP -> p
     | FAIL -> p
     | ASSIGN (a, b, y, l) ->
-       let y' = adjust_calls y in
+       let y' = adjust_calls d y in
        ASSIGN (a, b,y',l)
     | ASSERT (a, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        ASSERT (a, y', l) 
     | IF (a, b, c, y, l) ->
-       let b' = adjust_calls  b in
-       let c' = adjust_calls  c in
-       let y' = adjust_calls  y in
+       let b' = adjust_calls d b in
+       let c' = adjust_calls d c in
+       let y' = adjust_calls d y in
        IF (a, b', c', y', l)
     | WHILE (a, bs, b, c, y, l) ->
-       let b' = adjust_calls  b in
-       let y' = adjust_calls  y in
+       let b' = adjust_calls d b in
+       let y' = adjust_calls d y in
        WHILE (a, bs, b', c, y', l)
     | PROCCALL (z, a, b, i, y, l) ->
        begin
-         let y' = adjust_calls  y in
+         let y' = adjust_calls d y in
          try
            let sa, attr = E.decode (T.toExp a) in
            
-           let (fs_name, args, _) = List.find (fun (a',_,_) -> a'=sa) aux_funcs in
+           let (_, _, args) = List.find (fun (fname',blk_name,_) -> fname=fname' && blk_name=sa) aux_calls in
+           
            dbgf "BtoF" "%s (%a)" sa (fstrL T.fstr ",") args;
-           let a' = _T @@ E.encode (fs_name, attr) in
-           PROCCALL (z, a', b@args, i, y', l)
+           let a' = _T @@ E.encode (sa, attr) in
+           let params = List.map dc d in
+           let args',bd = List.fold_left (fun (args, bd) arg ->
+                           try
+                             let vn = T.toStr arg in
+                             let param = List.find (fun x -> E.var_decode x = vn) params in
+                             if E.is_ptr param then
+                               let fresh_v = fresh_var [] in
+                               let p = DECL (fresh_v, [], INIT_E, LOOKUP (fresh_v, T.enptr arg, "*", bd, dl), dl) in
+                               args@[_T fresh_v], p
+                             else
+                               args@[arg], bd
+                           with
+                             _ -> args@[arg], bd
+                         ) ([],SKIP) args in
+           join_at_last (PROCCALL (z, a', b@args', i, y', l)) bd
          with
            Not_found ->
         PROCCALL (z, a, b, i, y', l)
        end
     | CONS (a, b, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        CONS (a, b, y', l)
     | MUTATION (a, b, c, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        MUTATION (a, b, c, y', l)
     | LOOKUP (a, b, c, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        LOOKUP (a, b, c, y', l)
     | DISPOSE (a, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        DISPOSE (a, y', l)
     | MALLOC (a, tl, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        MALLOC (a, tl, y', l)
     | SARRAY (a, b, tl, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        SARRAY (a, b, tl, y', l)
     | MAPS (a, b, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        MAPS (a, b, y', l)
     | PARALLEL (b, c, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        PARALLEL (b, c, y', l)
     | BLOCK (a, y, l) ->
-       let a' = adjust_calls  a in
-       let y' = adjust_calls  y in
+       let a' = adjust_calls d a in
+       let y' = adjust_calls d y in
        BLOCK (a', y', l)
     | DECL (a, len, init_data, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        DECL (a, len, init_data, y', l)
     | RETURN (i, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        RETURN (i, y', l)
     | BREAK (y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        BREAK (y', l)
     | CONTINUE (y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        CONTINUE (y', l)
     | LABEL (lbl, el, y, l) ->
-       let y' = adjust_calls  y in
+       let y' = adjust_calls d y in
        LABEL (lbl, el, y', l)
   in
-  let p' = adjust_calls p in
-  let aux_fs:'a = List.map (fun (a,b,(c,d,e)) -> (a,b,(c,d,adjust_calls e))) aux_funcs in
-  p', aux_fs
+  let p' = adjust_calls [] p in
+  (* let aux_fs:'a = List.map (fun (a,b,(c,d,e)) ->
+                      (a,b,(c,d,adjust_calls d e))
+                    ) aux_funcs in *)
+  p'
 
 let rec ends_with_ret = function
     | SKIP -> false
@@ -1065,4 +1107,55 @@ let ret_merge = function
          ,l)
   
   | p -> p
-           
+
+
+       
+let rec traverse f f1 acc p =
+  match p with 
+    SKIP
+    | FAIL -> acc
+  | ASSERT (_, p', _) 
+    | ASSIGN (_, _, p', _)
+    | PROCCALL (_, _, _, _, p', _)
+    | CONS (_, _, p', _)
+    | MALLOC (_, _, p', _)
+    | SARRAY (_, _, _, p', _)
+    | MUTATION (_, _, _, p', _)
+    | LOOKUP (_, _, _, p', _)
+    | DISPOSE (_, p', _)
+    | MAPS (_, _, p', _)
+    | DECL (_, _, _, p', _)
+    | RETURN (_, p', _)
+    | LABEL (_, _,  p', _)
+    | BREAK (p', _)
+    | CONTINUE (p', _)
+    -> traverse f f1 (f acc p) p'
+  | IF (_, p1, p2, p', _)
+    | PARALLEL (p1, p2, p', _)
+    -> let acc' = f acc p in
+       let acc1 = traverse f f1 (f1 acc acc') p1 in
+       let acc2 = traverse f f1 (f1 acc acc1) p2 in
+       let acc3 =  traverse f f1 (f1 acc acc2) p' in
+       acc3
+  | WHILE (_, _, p1, _, p', _)
+    | BLOCK (p1, p', _)
+    ->
+     let acc' = f acc p in
+     let acc1 = traverse f f1 (f1 acc acc') p1 in
+     let acc2 = traverse f f1 (f1 acc acc1) p' in
+     acc2
+     
+let get_attribute p =
+  let f _ = function
+      RETURN (t, _, _) ->
+      let attr = try
+          T.head "" t
+        |> E.get_attributes
+        with
+          _ -> []
+      in
+      attr
+    | _ -> []
+  in
+  let f1 a b = b in
+  traverse f f1 [] p

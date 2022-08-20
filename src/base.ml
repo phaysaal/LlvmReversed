@@ -704,7 +704,10 @@ module Exp = struct
     else
       false
 
-  
+  let rec enptr = function
+    | VAR (s, a) -> VAR (s,PTR::a)
+    | BINOP (a, o, b) -> BINOP (enptr a, o, b)
+    | e -> e
       
 	let rec toStr = function
 		  NOTHING -> "<nothing>"
@@ -2466,8 +2469,11 @@ module Term = struct
   let term__string (tr_exp : Exp.t -> Exp.t) = function
     | NULL -> NULL
     | EXP exp -> EXP (tr_exp exp)
-   (* | x -> x *)
-
+  (* | x -> x *)
+               
+  let enptr = function
+      NULL -> NULL
+    | EXP e -> EXP (Exp.enptr e)
                      (*
 	let rec toTerm packs = function
 	 | Cabs.NOTHING -> NULL

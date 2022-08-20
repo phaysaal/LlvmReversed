@@ -84,9 +84,8 @@ let is_a_ptr ?(arr_mode=false) ptrs vs = function
      let b1 = S_E.exists (function E.VAR (sv,_) -> s=sv | _ -> false) ptrs in
      let b2 = List.mem E.PTR attr in
      let b3 = S_E.exists (function E.VAR (sv,attr') as v -> sv=s && E.is_ptr v  | _ -> false) vs in
-     
+     F.dbgf "SC_PTR" "%s -> b1:%a b2:%a b3:%a" s F.fstrB b1 F.fstrB b2 F.fstrB b3;
      let b = (b1 || b2 || b3) in
-     
      b
   | _ -> false
 ;;
@@ -157,6 +156,10 @@ let de_add = function
   | e -> raise (Unexpected (T.fstr () e ^ " is unexpected"))
 ;;
 
+let var_to_deref = function
+    C.(`OVar e) -> C.(`ODeref e)
+  | e -> e
+
 let rec exp_to_lhs ?(arg_mode=false) ?(arr_mode=false) ptrs vs e : C.lhs =
   match e with
     E.NOTHING ->
@@ -196,9 +199,10 @@ let rec exp_to_lhs ?(arg_mode=false) ?(arr_mode=false) ptrs vs e : C.lhs =
   | ADDR (a) ->
      begin
        let n = exp_to_lhs ptrs vs a in
-       match n with
+       (* match n with
          C.(`ODeref n') -> C.(`OVar n')
-       | _ -> raise (NotSupported "Not Good Addr")
+       | _ -> raise (NotSupported "Not Good Addr") *)
+       n
      end
   | REF (r) ->
      C.(`Mkref (exp_to_lhs ~arr_mode:false ptrs vs r))     
@@ -556,7 +560,6 @@ let rec declare_and_initialize declared' ptrs vs y a len init_data =
            let ins' = List.map (init_data_to_tuple ptrs) ins in
            C.(`Tuple ins')
       in
-      E.pprint a; F.pn "";
       
       (* let y, declared =
         fix_shadowing declared' a y'
@@ -718,43 +721,6 @@ let to_simple ptrs vs l =
   | _ ->
      let f = fresh_var () in
      T.EXP (E.VAR (f,[])), [(f, C.(`OVar (string_of_tvar l)))]
-
-     (*
-let rec mk_assert ptrs vs y b =
-  let rec mk_assert b =
-    match b with
-      B.UNIT (l, op, r) ->
-       let l', pr1 = to_simple ptrs vs l in
-       let r', pr2 = to_simple ptrs vs r in
-       let pr : (string * C.lhs) list = pr1@pr2 in
-       let cnd = C.{rop1= term_to_imm_op vs l';cond=string_of_op op; rop2= term_to_imm_op vs r'} in
-       let prog =  C.Assert (dp, cnd) in
-       pr, prog
-    | B.OP (B.UNIT (l,V.Op.LE,r), V.Op.OR, B.UNIT (l1,V.Op.EQ,r1)) when l=l1 && r=r1 ->
-       let l', pr1 = to_simple ptrs vs l in
-       let r', pr2 = to_simple ptrs vs r in
-       let pr : (string * C.lhs) list = pr1@pr2 in
-       let cnd = C.{rop1= term_to_imm_op vs l';cond="<="; rop2= term_to_imm_op vs r'} in
-       pr, C.Assert (dp, cnd)
-    | B.OP (l, V.Op.AND, r) ->
-       let pr1, p1 = mk_assert l in 
-       let pr2, p2 = mk_assert r in
-       pr1@pr2, C.Seq (ldp, p1, p2)
-    | B.OP _ ->
-       F.dbgf "SC" "%a" B.fstr b;
-       raise (NotSupported " yet")
-    | _ ->
-       raise (NotSupported " and never will")
-  in
-  let pr, p = mk_assert b in
-
-  let prog =  C.Seq (ldp,
-                     p,
-                     y) in
-  let all_prog = List.fold_left (fun prog (l,r) -> C.Let (dp, Ast.PVar l, r, prog)) prog pr in
-  prog
-;;
-      *)
      
 let rec mk_assert ptrs vs y b =
   let lhs_b = bexp_to_ifcond ptrs vs b in
@@ -764,39 +730,6 @@ let rec mk_assert ptrs vs y b =
   C.Cond (dp, lhs_b,
           C.Seq (ldp, C.Assert (dp, true_rel), y),
           C.Seq (ldp, C.Assert (dp, false_rel), y))
-  (*
-  let rec mk_assert b =
-    match b with
-      B.UNIT (l, op, r) ->
-       let l', pr1 = to_simple ptrs vs l in
-       let r', pr2 = to_simple ptrs vs r in
-       let pr : (string * C.lhs) list = pr1@pr2 in
-       let cnd = C.{rop1= term_to_imm_op vs l';cond=string_of_op op; rop2= term_to_imm_op vs r'} in
-       let prog =  C.Assert (dp, cnd) in
-       pr, prog
-    | B.OP (B.UNIT (l,V.Op.LE,r), V.Op.OR, B.UNIT (l1,V.Op.EQ,r1)) when l=l1 && r=r1 ->
-       let l', pr1 = to_simple ptrs vs l in
-       let r', pr2 = to_simple ptrs vs r in
-       let pr : (string * C.lhs) list = pr1@pr2 in
-       let cnd = C.{rop1= term_to_imm_op vs l';cond="<="; rop2= term_to_imm_op vs r'} in
-       pr, C.Assert (dp, cnd)
-    | B.OP (l, V.Op.AND, r) ->
-       let pr1, p1 = mk_assert l in 
-       let pr2, p2 = mk_assert r in
-       pr1@pr2, C.Seq (ldp, p1, p2)
-    | B.OP _ ->
-       F.dbgf "SC" "%a" B.fstr b;
-       raise (NotSupported " yet")
-    | _ ->
-       raise (NotSupported " and never will")
-  in
-  let pr, p = mk_assert b in
-
-  let prog =  C.Seq (ldp,
-                     p,
-                     y) in
-  let all_prog = List.fold_left (fun prog (l,r) -> C.Let (dp, Ast.PVar l, r, prog)) prog pr in
-  prog *)
 ;;
 
 let print_vars b vs =
@@ -815,9 +748,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
   match prog with
   | S.SKIP -> (S_E.empty, S_E.empty, [], C.Unit (dp))
   | ASSIGN (a, b, y, l) ->
-     
      let vs' = enptr a vs in
-     (* print_vars (ASSIGN (a,b,S.SKIP,l)) vs'; *)
      let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs') y in
      
      let sa = try string_of_evar a with e -> F.dbgf "SC" "Exception in Assing"; raise e in
@@ -907,19 +838,18 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      S_E.empty, S_E.empty, [], C.Assert (dp, bexp_to_relation vs (B.UNIT(T.zero, V.Op.NE, T.zero)))
   | PROCCALL (z, a, b, i, y, l) ->
      begin
-       let addrs' = (List.map T.toExp b)
+       let args_with_addr' = (List.map T.toExp b)
                     |> S_E.of_list
                     |> S_E.filter (function E.ADDR _ -> true | _ -> false) 
                     |> S_E.map (function E.ADDR x -> x | x -> x) in
-       let addrs = S_E.map (E.var_add E.PTR) addrs' in
-       let vs' = S_E.filter (fun v -> not (S_E.mem v addrs')) vs in
-       let vs'' = match z with
-           None -> vs'
+       let args_with_addr = S_E.map (E.var_add E.PTR) args_with_addr' in
+       let simple_args' = S_E.filter (fun v -> not (S_E.mem v args_with_addr')) vs in
+       let simple_args'' = match z with
+           None -> simple_args'
          | Some x ->
-            enptr x vs'
+            enptr x simple_args'
        in
-       let vs'3 = S_E.union vs'' addrs in
-       (* print_vars (PROCCALL (z, a, b, i, S.SKIP, l)) vs; *)
+       let vs'3 = S_E.union simple_args'' args_with_addr in
        let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs'3) y in
        let gvs = try DM.find (string_of_tvar a) dep_map with _ -> S_E.empty in
        let lgvs = to_list gvs in
@@ -936,10 +866,53 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
          let vparams = List.map var_of_assignee params in
          
          let par_arg = List.combine b vparams in
-         let args' = List.map (fun (a, p) ->
-                         term_to_lhs ~arg_mode:(E.is_ptr p) ptrs vs a
-                       ) par_arg in 
-         let all_args = args' @ lhs_gvs in
+         let args', es = List.fold_left (fun (args, es) (a,p) ->
+                             let e = term_to_lhs ptrs vs a in
+                             match a with
+                               T.EXP (E.ADDR ae) ->
+                                begin match E.is_ptr ae, E.is_ptr p with
+                                  false, true ->
+                                   if is_a_ptr ptrs vs ae then
+                                       let e = exp_to_lhs ~arg_mode:true ptrs vs ae in
+                                       e::args, es
+                                   else
+                                     let freshv = fresh_var () in
+                                     C.(`OVar freshv)::args, fun x -> C.(es (Let (dp, Ast.PVar freshv, `Mkref e, x)))
+                                | false, false ->
+                                   var_to_deref e::args, es
+                                | true, false ->
+                                   let freshv = fresh_var () in
+                                   C.(`ODeref freshv)::args, fun x -> C.(es (Let (dp, Ast.PVar freshv, var_to_deref e, x)))
+                                | true, true ->
+                                   E.pprint ae; F.pn "";
+                                   raise (Supported "") end
+                             | _ ->   
+                                let ae = T.toExp a in
+                                match E.is_ptr ae, E.is_ptr p with
+                                | true, true | false, false ->
+                                   e::args, es
+                                | true, false ->
+                                   var_to_deref e::args, es
+                                | false, true ->
+                                   let freshv = fresh_var () in
+                                   C.(`OVar freshv)::args, fun x -> C.(es (Let (dp, Ast.PVar freshv, `Mkref e, x)))
+                           ) ([], fun x -> x) par_arg in
+         
+         (* let args' = List.map (fun (a, p) ->
+                         let e = term_to_lhs ptrs vs a in
+                         let ae = T.toExp a in
+                         match E.is_ptr ae, E.is_ptr p with
+                         | true, true | false, false -> e
+                         | true, false ->
+                            var_to_deref e
+                         | false, true ->
+                            e
+                         (* if not (E.is_ptr (T.toExp a)) && E.is_ptr p then
+                           term_to_lhs ptrs vs a
+                         else
+                           term_to_lhs ~arg_mode:(E.is_ptr p) ptrs vs a *)
+                       ) par_arg in *)
+         let all_args = (List.rev args') @ lhs_gvs in
          let ptrs', p, declared =
            match z with
              None ->
@@ -948,13 +921,12 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
                                    `Call (string_of_tvar a, List.length b, all_args)),
                             y')), declared
            | Some z' ->
-              (* let y', declared = fix_shadowing declared z' y' in *)
               S_E.add z' ptrs, C.(Seq (ldp, Assign (dp, string_of_evar z', `Call (string_of_tvar a, List.length b, all_args)), y')), declared
          in
-         (S_E.union ptrs' addrs,
+         (S_E.union ptrs' args_with_addr,
           declared,
           ry,
-          p)
+          es p)
        with
          Not_found ->
           (ptrs,
@@ -1376,7 +1348,7 @@ let rec get_func_global_dep2 progs dep_map glos =
   ()
 
 let slac_to_consort progs =
-  F.pn "";
+  V.Options.show_types := true;
   structs := List.fold_left (fun acc -> (function G.STRUCT (a,_) -> a::acc | _ -> acc)) [] progs;
   let funs = List.filter
                (function
@@ -1408,9 +1380,6 @@ let slac_to_consort progs =
       ) [] funs in
   procedures := procs;
 
-  (*
-  get_func_global_dep3 procs DM.empty procs;
-  raise (Unexpected ""); *)
   let dep_map = get_func_global_dep3 procs DM.empty procs in
   F.pn "dep map is finished";
   let fns = slacC_to_prog dep_map [] funs in
@@ -1435,7 +1404,7 @@ let slac_to_consort progs =
 let print_consort consort fname progs =
   let (fns, body) = slac_to_consort progs in
   Ftools.pn "Translation to ConSORT is finished";
-
+  
   if consort = "" then
     begin
       ConsortAstPrinter.pretty_print_program stdout (fns, body)

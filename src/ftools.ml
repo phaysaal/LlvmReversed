@@ -205,9 +205,11 @@ let rec concatS s f = function
 
 let fstrL f s () =
   concatS s (f ())
-
-let fstrId = fun () s -> Format.sprintf "%s" s
   
+let fstrId = fun () s -> Format.sprintf "%s" s
+
+let fstrB = fun () -> function true -> fstrId () "True" | false -> fstrId () "False"
+
 let rec iterS f delim = function
 	| [] -> p ""
 	| [x] -> f x
@@ -504,3 +506,11 @@ let corr_fieldname f =
     "field_" ^ f
   else
     f
+
+let rec lfp f x =
+  let r, x' = f x in
+  if r then
+    x'
+  else
+    lfp f x'
+

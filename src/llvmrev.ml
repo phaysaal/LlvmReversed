@@ -90,6 +90,9 @@ let parse_args () =
       | "-np" ->
          T.non_pattern := true;
          aux (i+1)
+      | "-t" ->
+         V.Options.show_types := true;
+         aux (i+1)
       | _ -> 
          if i < l-1 then  
            match d with
@@ -123,7 +126,7 @@ let compile_a_cpp_file (path, file) =
         ""
     in
     aux 2 in *) 
-  let str_cmd = "clang -fno-discard-value-names -emit-llvm -o " ^ !comp_dir ^ file ^ ".bc -c " ^ path in
+  let str_cmd = "clang -fno-discard-value-names -O0 -emit-llvm -o " ^ !comp_dir ^ file ^ ".bc -c " ^ path in
   T.pf "%s\n" str_cmd;
   let r = Sys.command str_cmd in
   if r = 0 then

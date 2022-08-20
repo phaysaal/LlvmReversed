@@ -1,5 +1,7 @@
 module L = Llvm
-         
+
+let stv = L.string_of_llvalue;;
+
 let print_fun lv =
   Printf.printf "%s\n" (L.value_name lv);
   Llvm.iter_blocks
