@@ -21,7 +21,7 @@ let to_var = function
      raise (StError "Procedure")
 
 let print_var a =
-  p "int ";
+  (* p "int ";
   ((if V.Exp.is_struct a then
       let st = V.Exp.get_struct_name a in
       pw st);
@@ -29,7 +29,9 @@ let print_var a =
      pw "**"
    else if V.Exp.is_ptr a then
      pw "*");
-  V.Exp.pprint a
+  V.Exp.pprint a *)
+  let s = B.string_of_decl a [] in
+  p s
 ;;
     
 let pprint ((a, b, c):t) =

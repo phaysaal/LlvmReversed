@@ -61,9 +61,9 @@ let rec print_init = function
 
 let string_of_decl a len =
   match a with
-    E.VAR (sname, _) ->
+    E.VAR (sname, attrs) ->
      let sname' = corr_fieldname sname in
-     
+     let str = E.var_get_printable_string (sname', attrs) in
     ((if Exp.is_struct a then
         let st = Exp.get_struct_name a in
         (st ^ " ")
@@ -76,7 +76,7 @@ let string_of_decl a len =
        else
          "") ^ 
     (if Exp.is_funcptr a && not (Exp.is_func a) then
-       ( "( *" ^ sname' ^ ")") else sname') ^ 
+       ( "( * " ^ str ^ ")") else str) ^ 
       (if List.length len > 0 then
          ("[" ^ fstrL (Exp.fstr) "][" () len ^ "]") else "")
   | _ ->
@@ -586,7 +586,11 @@ let rec substitute u t p =
     | Some x -> Some (E.substitute u t x)
   in
   let subs_e = E.substitute u t in
-  let subs_t = T.substitute (_T u) (_T t) in
+  let subs_t p =    
+    let r = T.substitute (_T u) (_T t) p in
+    dbgf "SUBS" "%a[%a := %a] = %a" T.fstr p E.fstr u E.fstr t T.fstr r;
+    r
+  in
   let subs_b = B.substitute (_T u) (_T t) in
   let subs = substitute u t in
   let rec subs_i = function
@@ -606,7 +610,7 @@ let rec substitute u t p =
   | WHILE (a, bs, b, c, y, l) ->
      WHILE (subs_b a, bs, subs b, c, subs y, l)
   | PROCCALL (z, a, b, i, y, l) ->
-     PROCCALL (subs_op z, a, List.map subs_t b, i, y, l)
+     PROCCALL (subs_op z, a, List.map subs_t b, i, subs y, l)
   | CONS (a, b, y, l) ->
      CONS (subs_e a, b, subs y, l)
   | MUTATION (a, b, c, y, l) ->
@@ -653,7 +657,6 @@ let restore_prog structures p =
     | SKIP -> (S.empty, S.empty), p
     | FAIL -> (S.empty, S.empty), p
     | ASSIGN (a, T.EXP ((E.VAR _) as b), y, l) when E.is_ptr a && E.is_ptr b && E.is_param b ->
-       (* pprint 2 (ASSIGN (a, T.EXP b, SKIP, l)); *)
        let y' = substitute a b y in
        let (r,s), y'' = restore_prog locals y' in
        (* if !noop || (* E.is_global a || E.is_param a ||*) not (List.mem a locals) || S.mem a s then *)
@@ -673,12 +676,13 @@ let restore_prog structures p =
             IF (a,
                 BLOCK ((ASSIGN(x1, T.EXP (E.CONST 1),SKIP,_) as p1), SKIP, _),
                 BLOCK ((ASSIGN(x2, T.EXP (E.CONST 0),SKIP,_) as p2), SKIP, _),
-                y, l),d3) when x1=x2 && x=x1 ->
+                ASSIGN (from_blk, blk, y, l1), l),d3) when x1=x2 && x=x1 ->
        begin match y with
          WHILE (b, _, _, _, _, _) |
          IF (b, _, _, _, _) |
-           ASSERT ((_,b::_,_,_)::_, _, _)  when a=b ->  
-          let (r, s), y' = restore_prog locals y in
+           ASSERT ((_,b::_,_,_)::_, _, _)  when a=b ->
+          let y1 = ASSIGN (from_blk, blk, y, l1) in
+          let (r, s), y' = restore_prog locals y1 in
           
           if E.is_global x1 || E.is_param x1 || S.mem x1 s then
             let s' = S.add x s in
@@ -686,7 +690,8 @@ let restore_prog structures p =
           else
             (r,s), y'
          | _ ->
-            let (r, s), y' = restore_prog locals y in
+            let y1 = ASSIGN (from_blk, blk, y, l1) in
+            let (r, s), y' = restore_prog locals y1 in
           
             let s' = S.add x s in
             (r, addfvs s' (B.fv a)), DECL (x, d1, d2, IF (a, p1, p2, y', l), d3)

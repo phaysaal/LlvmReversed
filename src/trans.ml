@@ -80,7 +80,7 @@ let corrected_aux_funcs : (E.t * B.t list * B.t) list ref = ref [];;
 let aux_calls : (string * string * T.t list) list ref = ref [];;
 
 
-let structures : (string * L.lltype list) list ref = ref [];;
+
 
 let rec get_struct llt =
     match L.classify_type llt with
@@ -105,15 +105,16 @@ let add_struct lli =
       None -> ()
     | Some llt ->
        let nm = L.struct_name llt in
-       let flds = L.struct_element_types llt in
-       let l_flds = Array.to_list flds in
        match nm with
          Some snm ->
-          if List.exists (function (s,_) -> s=snm) !structures then
+          if List.exists (function (s,_,_) -> s=snm) !Types.structures then
             ()
           else
             begin
-              structures := !structures @ [(snm, l_flds)];
+              let flds = L.struct_element_types llt in
+              let l_flds = Array.to_list flds in
+              let fields' = Types.get_field_attrs llt in
+              Types.add_structure snm llt fields';
               List.iter add_rec_struct l_flds
             end
        | None ->
@@ -130,17 +131,24 @@ let print_var vars =
 let get_structures () =
   let module V = Map.Make (String) in
   let convert_fields flds =
-    List.mapi (fun i fld ->
-        let attr = Types.get_types fld in
+    List.mapi (fun i attr ->
         (E.VAR (string_of_int i, attr), T.NULL)) flds
   in
-  let find_rec_fld _ = None in (** Need to implement for List, Tree, etc. data structure *)
-  let structures = List.fold_left (fun acc (s, flds) ->
+  let find_rec_fld ty flds =
+    let fld_types = Array.to_list @@ L.struct_element_types ty in
+    let flds_with_lltypes = List.combine flds fld_types in 
+    let rec_flds = List.filter (fun (_, lltype) -> lltype=ty) flds_with_lltypes |> List.map fst |> List.map fst in
+    if List.length rec_flds = 0 then
+      None
+    else
+      Some rec_flds
+  in (** Need to implement for List, Tree, etc. data structure *)
+  let structures = List.fold_left (fun acc (s, ty, flds) ->
                        let flds' = convert_fields flds in
-                       let rec_fld = find_rec_fld flds' in
+                       let rec_fld = find_rec_fld ty flds' in
                        let st = (s, flds', rec_fld) in
 
-                       V.add s st acc) V.empty !structures in
+                       V.add s st acc) V.empty !Types.structures in
   structures
 ;;
 
@@ -158,7 +166,7 @@ let get_attr vars is_strict vn =
 let rec get_array_type tp =
   match L.classify_type tp with
     TK.Array -> Some tp
-  | TK.Pointer
+  | TK.Pointer -> get_array_type @@ L.element_type tp (* fixed@8/20: eg_arr_1 *)
   | TK.Vector
   | TK.Struct
   | _ -> None
@@ -177,6 +185,9 @@ let rec get_constant lli =
 
 let is_a_struct = List.exists (function E.STRUCT _ -> true | _ -> false)
 ;;
+
+
+
 
 let rec remove_first_ptr = function
     [] -> []
@@ -260,6 +271,24 @@ let add_ps ps p =
   B.join_at_last p (B.join_progs ps)
 ;;
 
+let decode_atomic s op0 op1 =
+  (* ex.
+     Current Instr:   %2 = atomicrmw sub i32* %0, i32 %1 acq_rel, align 4
+   *)
+  let rhs_eq = String.split_on_char '=' s |> fun a -> List.nth a 1 in
+  let sop = String.split_on_char ' ' rhs_eq |> fun a -> List.nth a 2 in
+  let op = match sop with
+    | "sub" -> V.Op.SUB
+    | "add" -> V.Op.ADD
+    | _ -> F.pn ("******************* " ^ sop); raise (Err ("\nUnexpected operator " ^ sop ^ "\n"))
+  in
+  let freshv = B.fresh_var [] in
+  let p0 = B.decl freshv  1 in
+  let p1 = B.lookup freshv (_T op1) "*" in
+  let p2 = B.mutation (_T op0) "*" (T.op (_T freshv) (_T op1) op) in
+  let p3 = B.lookup freshv (_T op1) "*" in
+  B.join_progs [p0;p1;p2;p3], freshv
+;;
 
 let rec get_exp_from_llvalue ?(addr=false) vars lli =
 
@@ -305,7 +334,7 @@ let rec get_exp_from_llvalue ?(addr=false) vars lli =
               end
          end
       | _ ->
-         raise (Err "")
+         raise (Err "vk is other kind")
     in
     ps,v
   in
@@ -315,34 +344,34 @@ let rec get_exp_from_llvalue ?(addr=false) vars lli =
      begin
        F.dbgf "VAL" "%s is %s" (stv lli) (P.print_value_kind @@ L.classify_value lli);
        let s = L.value_name lli in
-       if s = "" then
-         begin
-           F.dbgf "VAL" "%s is ''" s;
-           let stvlli = stv lli in
-           let r =
-             if VR.mem stvlli !unnamed_param then
-               [], VR.find stvlli !unnamed_param
-             else
-                try get_exp_from_ref vars lli with
-                  PHI instr ->
-                   F.dbgf "STO" "%s" (L.operand instr 0 |> stv);
-                   let p, v = get_phi_val vars instr in
-                   p, v
-                | e ->
-                   Printf.printf "Called from exp...\n"; raise e in
-           r
-         end
-       else
-         begin
-           F.dbgf "VAL" "%s is not ''" s;
-           let _, r = get_var vars ~addr:addr lli in
-           [], r
-         end
+          if s = "" then
+            begin
+              F.dbgf "VAL" "%s is ''" s;
+              let stvlli = stv lli in
+              let r =
+                if VR.mem stvlli !unnamed_param then
+                  [], VR.find stvlli !unnamed_param
+                else
+                  try get_exp_from_ref vars lli with
+                    PHI instr ->
+                     F.dbgf "STO" "%s" (L.operand instr 0 |> stv);
+                     let p, v = get_phi_val vars instr in
+                     p, v
+                  | e ->
+                     Printf.printf "Called from exp...\n"; raise e in
+              r
+            end
+          else
+            begin
+              F.dbgf "VAL" "%s is not ''" s;
+              let _, r = get_var vars ~addr:addr lli in
+              [], r
+            end
      end
     
 
 and mk_phi vars v instr =
-  if !non_pattern then
+  (* if !non_pattern then *)
     begin
       let srcblk = _T @@ B.var "src_blk" [] in
       let incomings = L.incoming instr in
@@ -356,24 +385,24 @@ and mk_phi vars v instr =
                 ) B.SKIP incomings in
       p
     end
-  else
-    raise Not_found
+  (* else
+    raise Not_found *)
   
 and get_phi_val vars instr =
-  if !non_pattern then
+  (* if !non_pattern then *)
     begin
       let fv = B.fresh_var [] in
       let dc = B.decl fv 1 in
       let p  = mk_phi vars fv instr in
       dc::p::[], fv
     end
-  else
+  (* else
     begin
       let fv = B.fresh_var [] in
       let dc = B.decl fv 1 in
       let p  = mk_phi_pattern vars fv instr in
       dc::p::[], fv
-    end
+    end *)
 
 and mk_phi_pattern vars v instr =
     begin
@@ -432,13 +461,14 @@ and get_exp_from_ref vars lli =
     O.Load
   | O.BitCast
     |	ExtractValue
-      | ZExt ->
+    | ZExt ->
      begin
        F.dbgf "CAST" "lli: %d %s" (L.num_operands lli) (stv lli);
        if L.num_operands lli = 1 then
          begin
            let ty = L.type_of lli in
            let opc = L.operand lli 0 in
+           F.dbgf "CAST" "op_1: %s" (stv opc);
            let op_ty = L.type_of opc in
            let ps, e_src = try
                get_exp_from_llvalue vars opc
@@ -447,11 +477,13 @@ and get_exp_from_ref vars lli =
                Printf.printf "get_exp_from_ref %s\n" (L.string_of_llvalue lli);
                raise e
            in
+           F.dbgf "CAST" "src:%a" E.fstr e_src;
            match get_struct ty, get_struct op_ty with
              Some dest, Some src when Types.get_struct_name dest <> Types.get_struct_name src ->
               begin
                 let dest_st_name = Types.get_struct_name dest in
                 let src_st_name  = Types.get_struct_name src in
+                F.dbgf "CAST" "dest: %s src: %s" dest_st_name src_st_name;
                 if dest_st_name <> src_st_name then
                   begin
                     F.dbgf "CAST" "%s -> %s" src_st_name dest_st_name;
@@ -459,8 +491,7 @@ and get_exp_from_ref vars lli =
                     
                     let v_dest = B.fresh_var st in
                     let p = B.DECL (v_dest, [], B.INIT_S (B._T e_src), B.SKIP, B.dl) in
-                    
-                    
+                               
                     ps@[p], v_dest
                   end
                 else
@@ -502,9 +533,23 @@ and get_exp_from_ref vars lli =
      ps@[p], fv
      (* F.pn "*********";
      raise (Err "") *)
+  | AtomicRMW ->
+     let ps, e = translate_atomic vars lli in
+     ps, e
   | _ ->
      Printf.printf "get_exp_from_ref %s\n" (L.string_of_llvalue lli);
      raise (Err "Other opcode in get_exp_from_ref")
+
+and translate_atomic vars lli =
+  F.dbgf "ATOM" "|n|:%d, |0|:%s |1|:%s" (L.num_operands lli) (stv @@ L.operand lli 0) (stv @@ L.operand lli 1);
+  let op0 = L.operand lli 0 in
+  let op1 = L.operand lli 1 in
+  let ps0, exp0 = get_exp_from_llvalue vars op0 in
+  let ps1, exp1 = get_exp_from_llvalue vars op1 in
+  F.dbgf "ATOM" "|0|:%a |1|:%a" E.fstr exp0 E.fstr exp1;
+  let p, exp = decode_atomic (stv lli) exp0 exp1 in 
+  
+  ps0@ps1@[p], exp
 
 and get_ptr_element vars lli =
   if L.num_operands lli < 0 then
@@ -583,34 +628,83 @@ and get_ptr_element vars lli =
     end
 
 and get_const_expr vars lli =
-  let opn = L.num_operands lli in
-  if opn = 1 then
-    let lli0 = L.operand lli 0 in
-    get_exp_from_llvalue vars lli0
-  else if opn = 3 then
-    begin
-      let lli0 = L.operand lli 0 in
-      let lli0ty = L.type_of lli0 in
-      if LA.is_array lli0ty || LA.is_struct lli0ty then
-        begin
-          let ps, (pt, fld) = get_ptr_element vars lli in
-          let ept = T.toExp pt in
-          let attr = E.get_attributes ept in
-          let attr' = List.filter (function E.GLOBAL | E.ARRAY _ | E.PTR -> false | _ -> true) attr in
-          let frv = B.fresh_var attr' in
-          let p1 = B.decl frv 1 in
-          let p2 = if fld = "-" then B.assign frv pt else B.lookup frv pt fld in
-          let p = B.join_at_last p2 p1 in
-          p::ps, frv
-        end
-      else
-        begin
-          
-            raise (Err ("const expr exception in " ^ stv lli))
-        end
-    end
-  else
-    raise (Err ("GetConstExpr| Unsupported Number of Operands " ^ (string_of_int opn)))
+     let opn = L.num_operands lli in
+     if opn = 1 then
+       begin let lli0 = L.operand lli 0 in
+             get_exp_from_llvalue vars lli0 end
+     else (* if opn = 3 then *)
+       begin
+         let lli0 = L.operand lli 0 in
+         let lli0ty = L.type_of lli0 in
+         if LA.is_array lli0ty || LA.is_struct lli0ty then
+
+           let rec get_ptr_element acc ptr typ i =
+             if i >= opn then
+               acc, ptr
+             else
+               begin let idx = L.operand lli i in
+                     F.dbgf "GPE" "i:%d ptr:%a typ:%s\n%s" i E.fstr ptr (Print.string_of_type typ) (stv idx);
+                     let ps, e_idx = get_exp_from_llvalue vars idx in
+                     match L.classify_type typ with
+                     | L.TypeKind.Array ->
+                        let fld = "*" in
+                        let pt = B._T @@ B.add ptr e_idx in
+                        let ept = ptr in
+                        let attr = E.get_attributes ept in
+                        let attr' = remove_first_ptr attr in
+                        let frv = B.fresh_var attr' in
+                        let p1 = B.decl frv 1 in
+                        let p2 = B.lookup frv pt fld in
+                        let p = B.join_at_last p2 p1 in
+                        
+                        get_ptr_element (acc@ps@[p]) frv (L.element_type typ) (i+1)
+                     | L.TypeKind.Pointer ->
+                        get_ptr_element acc ptr (L.element_type typ) (i+1)
+                     | L.TypeKind.Struct ->
+                        let fld = E.fstr () e_idx in
+                        let pt = B._T ptr in
+                        let ept = ptr in
+                        let attr = E.get_attributes ept in
+                        let attr' = remove_first_ptr attr in
+                        let frv = B.fresh_var attr' in
+                        let p1 = B.decl frv 1 in
+                        let p2 = B.lookup frv pt fld in
+                        let p = B.join_at_last p2 p1 in
+                        let fldtypes = L.struct_element_types typ in
+                        let cidx = E.get_int V.Locs.dummy e_idx in                        
+                        
+                        get_ptr_element (acc@ps@[p]) frv (Array.get fldtypes cidx) (i+1)
+                     | _ ->
+                        F.pn "### OTHERS";
+                        raise (Err ("const expr exception in " ^ stv lli))
+               end
+           in
+           let ptr = L.operand lli 0 in
+           let _, e_ptr = get_var vars ptr in
+           get_ptr_element [] e_ptr lli0ty 1
+           
+             (* begin
+             let ps, (pt, fld) = get_ptr_element vars lli in
+             let ept = T.toExp pt in
+             let attr = E.get_attributes ept in
+             let attr' = List.filter (function E.GLOBAL | E.ARRAY _ | E.PTR -> false | _ -> true) attr in
+             let frv = B.fresh_var attr' in
+             let p1 = B.decl frv 1 in
+             let p2 = if fld = "-" then B.assign frv pt else B.lookup frv pt fld in
+             let p = B.join_at_last p2 p1 in
+             p::ps, frv *)
+         else
+           begin
+             raise (Err ("const expr exception in " ^ stv lli))
+           end
+       end
+(*
+       end
+     else
+       begin
+         let err_s = ("GetConstExpr| Unsupported Number of Operands " ^ (string_of_int opn)) in
+         F.pn err_s;
+         raise (Err err_s) end *)
 
 and get_var vars ?(is_global=false) ?(is_param=false) ?(is_local=false) ?(addr=false) ?(alloca=false) lli =
  
@@ -965,6 +1059,7 @@ let get_invoke_parameters vars lli =
 
 
 
+
 let mk_assign_maybe vars lli o =
   let vname = L.value_name lli in
 
@@ -1039,21 +1134,22 @@ let mk_assign_maybe vars lli o =
 
 let rec indirect_src dest vars lli =
   let nm = L.value_name lli in
-  let _, e_src = try get_exp_from_llvalue vars lli with e -> raise e in
+  let ps0, e_src = try get_exp_from_llvalue vars lli with e -> raise e in
   match L.classify_value lli with
     VK.Instruction O.GetElementPtr ->
      let ps, (ptr, fld) = get_ptr_element vars lli in
      if fld = "-" then
-       add_ps ps @@ B.assign dest ptr
+       ps0, add_ps ps @@ B.assign dest ptr
      else
-       add_ps ps @@ B.lookup dest ptr fld
+       ps0, add_ps ps @@ B.lookup dest ptr fld
   | VK.Instruction O.Load ->
      if VR.mem nm vars then
-       B.assign dest (B._T e_src)
+       ps0, B.assign dest (B._T e_src)
      else
-       indirect_src dest vars @@ L.operand lli 0
+       let ps00, p = indirect_src dest vars @@ L.operand lli 0 in
+       ps0 @ ps00, p
   | _ ->
-     B.assign dest (B._T e_src)
+     ps0, B.assign dest (B._T e_src)
 ;;
 
 let get_last_cond_br (inst : L.llvalue) =
@@ -1129,38 +1225,39 @@ let rec translate_instruction ?(tl=false) (cblk, callstack) vars lli =
                  match tv with
                    L.TypeKind.Void ->
                     raise (Err "N/S Void")
-                  |	Integer | Pointer ->
+                  |	Integer | Pointer | Double ->
                      if L.is_constant rt then
-                       let ps, e = try get_exp_from_llvalue vars rt with e -> Printf.printf "translate_instruction(Ret)\n"; raise e in
-                       add_ps ps @@ B.return (B._T e)
+                       begin let ps, e = try get_exp_from_llvalue vars rt with e -> Printf.printf "translate_instruction(Ret)\n"; raise e in
+                             add_ps ps @@ B.return (B._T e) end
                      else
                        if is_load rt then
-                         let dt = L.operand rt 0 in
-                         if LA.is_ptr_element dt then
-                           begin
-                             F.dbgf "RET" "Is a PTR";
-                             let _, e_vname = get_var vars dt in
-                             let t_vname = B._T e_vname in
-                             let p2 = B.return t_vname in
-                             let ps2, (ptr, fld) = get_ptr_element vars dt in
-                             let p1 = B.SKIP (*  if fld = "-" then B.assign e_vname ptr else B.lookup e_vname ptr fld in *) in
-                             let p = B.join_at_last p2 p1 in
-                             add_ps ps2 p
-                           end
-                         else
-                           begin
-                             let ps, e_dt = get_exp_from_llvalue vars dt in
-                             if (E.is_ptr e_dt && not(E.is_ptr !current_func)) then
-                               let attr = E.get_attributes !current_func in
-                               let tmp = B.fresh_var attr in
-                               let p1 = B.decl tmp 1 in
-                               let p2 = B.lookup tmp (B._T e_dt) "*" in
-                               let p3 = B.return (B._T tmp) in
-                               B.join_progs (ps@[p1;p2;p3])
-                             else
-                               let t_dt = B._T e_dt in
-                               add_ps ps @@ B.return t_dt
-                           end
+                         begin let dt = L.operand rt 0 in
+                               if LA.is_ptr_element dt then
+                                 begin
+                                   F.dbgf "RET" "Is a PTR";
+                                   let _, e_vname = get_var vars dt in
+                                   let t_vname = B._T e_vname in
+                                   let p2 = B.return t_vname in
+                                   let ps2, (ptr, fld) = get_ptr_element vars dt in
+                                   let p1 = B.SKIP (*  if fld = "-" then B.assign e_vname ptr else B.lookup e_vname ptr fld in *) in
+                                   let p = B.join_at_last p2 p1 in
+                                   add_ps ps2 p
+                                 end
+                               else
+                                 begin
+                                   let ps, e_dt = get_exp_from_llvalue vars dt in
+                                   if (E.is_ptr e_dt && not(E.is_ptr !current_func)) then
+                                     let attr = E.get_attributes !current_func in
+                                     let tmp = B.fresh_var attr in
+                                     let p1 = B.decl tmp 1 in
+                                     let p2 = B.lookup tmp (B._T e_dt) "*" in
+                                     let p3 = B.return (B._T tmp) in
+                                     B.join_progs (ps@[p1;p2;p3])
+                                   else
+                                     let t_dt = B._T e_dt in
+                                     add_ps ps @@ B.return t_dt
+                                 end
+                         end
                        else
                          begin
                            F.dbgf "RET" "Is not a Load";
@@ -1170,6 +1267,10 @@ let rec translate_instruction ?(tl=false) (cblk, callstack) vars lli =
                          end
                   | X86_mmx ->
                      B.return (B._T @@ V.Exp.CONST 0)
+                  | Struct ->
+                     let ps, exp = get_exp_from_llvalue vars rt in
+                     let t_dt = B._T exp in
+                     add_ps ps @@ B.return t_dt
                   | _ ->
                      F.dbgf "RET" "Type: %s\n" (P.string_of_type ty);
                      pf "Other kinds of return: %d %s\n" (L.num_operands lli) (L.string_of_llvalue lli);
@@ -1266,33 +1367,33 @@ let rec translate_instruction ?(tl=false) (cblk, callstack) vars lli =
         |	O.Alloca ->
            begin
              let vars', v = get_var vars ~is_local:true ~alloca:true lli in
-             F.dbgf "DEB1" "(%a) %s" E.fstr v (stv lli);
+             F.dbgf "ALLOCA" "(%a) %s" E.fstr v (stv lli);
+             add_struct lli;
              let tp = L.type_of lli in
              match get_array_type tp with
                Some tp ->
+                F.dbgf "ALLOCA" "It is a array type";
                 begin
-                  add_struct lli;
                   let size = L.array_length tp in
                   vars', B.decl v size
                 end
              | None ->
                 let op = L.operand lli 0 in
                 let ps, size = get_exp_from_llvalue vars op in
-                F.dbgf "DEB1" "(%a) size:  %a" E.fstr v E.fstr size;
-                add_struct lli;
+                F.dbgf "ALLOCA" "(%a) size:  %a" E.fstr v E.fstr size;
                 begin
                   match size with
                     E.CONST sz ->
                      if sz > 1 then
                        begin
                          let r = B.decl v sz in
-                         F.pf_s "DEB1" (B.pprint 0) r;
-                         F.dbgf "DEB1" "...............";
+                         F.pf_s "ALLOCA" (B.pprint 0) r;
+                         F.dbgf "ALLOCA" "...............";
                          vars', add_ps ps r
                        end
                      else
                        begin
-                         F.dbgf "DEB1" "Non-Array";
+                         F.dbgf "ALLOCA" "Non-Array";
                          (* let vars', v = get_var vars ~is_local:true lli in *)
                          let r = B.decl v 1 in
                          vars', add_ps ps r
@@ -1324,10 +1425,14 @@ let rec translate_instruction ?(tl=false) (cblk, callstack) vars lli =
                               F.dbgf "STO" "%s" (L.operand instr 0 |> stv);
                               let _, p, v = mk_phi' vars lli instr in
                               [p], v
+                           | Err s ->
+                              F.dbgf "STO" "Exception in Store (%s)" s;
+                              raise (Err s)
                            | e ->
                               F.dbgf "STO" "Exception in Store";
                               raise e in
            F.dbgf "STO" "Src: %a" E.fstr e_src;
+           F.pf_s "STO" (List.iter (fun p -> Block.pprint 0 p)) ps;
            let dest = L.operand lli 1 in
            F.dbgf "STO" "Dest:%s" (stv dest);
            if is_indirect dest then
@@ -1363,10 +1468,10 @@ let rec translate_instruction ?(tl=false) (cblk, callstack) vars lli =
              begin
                F.dbgf "STO" "Else Src";
                
-               let ps1, e_src = get_exp_from_llvalue vars src in
+               (* let ps1, e_src = get_exp_from_llvalue vars src in *) (* deleted@8/20: eg_arr_3 *)
                let ps2, v_dest = get_exp_from_llvalue vars dest in
-               let p = indirect_src v_dest vars src in
-               vars, add_ps (ps1@ps2) p
+               let ps, p = indirect_src v_dest vars src in
+               vars, add_ps (ps@ps2) p
              end
         |	GetElementPtr ->
            let vn = L.value_name lli in
@@ -1577,7 +1682,14 @@ let rec translate_instruction ?(tl=false) (cblk, callstack) vars lli =
            if vv = "" then
              vars , B.SKIP
            else
-             vars , B.SKIP
+             begin
+               let vars', lhs = get_var vars lli in
+               let p0 = B.decl lhs 1 in
+               let p1 = mk_phi vars lhs lli in
+               let p = B.join_progs ([p0;p1]) in
+             
+               vars' , p
+             end
         |	Resume
           |	Unreachable
           -> vars, B.SKIP
@@ -1586,9 +1698,14 @@ let rec translate_instruction ?(tl=false) (cblk, callstack) vars lli =
           ->
            vars, mk_assign_maybe vars lli O.Sub
         | AtomicRMW ->
-           
-           F.dbgf "ATOM" "|0|:%s |1|:%s" (stv @@ L.operand lli 0) (stv @@ L.operand lli 1);
-           raise (Err ("\nUnexpected ValueKind " ^ str ^ "\n"))
+           let vv = L.value_name lli in
+           if vv = "" then
+             vars , B.SKIP
+           else
+             begin
+               let p, _ = translate_atomic vars lli in
+               vars, List.hd p
+             end
         | PtrToInt ->
            let vv = L.value_name lli in
            if vv = "" then
@@ -1749,6 +1866,7 @@ and to_while_t_blk vars blk =
       (fun (_vars, acc) lli ->
         F.dbgf "BtoFU" "--* %s" (stv lli);
         let _vars', l = translate_instruction ~tl:true (0,[]) _vars lli in
+        F.pf_s "CUR" (B.pprint 1) l;
         match l with
           B.SKIP ->
            _vars', acc
@@ -1842,7 +1960,6 @@ let parse_unconditional blk =
   match last_inst with
     L.After inst ->
      begin
-       F.dbgf "IF" "last inst: %s" (stv inst);
        match get_last_br inst with
          Some _L1 ->
           Some (inst, _L1)
@@ -1975,6 +2092,8 @@ let parse_or (dpkg:pkg) ps = function
           with
             Not_parsed ->
             aux ps'
+          | e ->
+             raise e
      in
      aux ps
 ;;
@@ -2612,7 +2731,7 @@ and parse_ands (blk_arr, vars, f) cond lblEl (i,n) =
 and parse_ifelse (blk_arr, vars, f) (lblTh, lblEl, (i,n)) =
   F.dbgf "IF" "---->Trying If Else (%d,%d) Then:%s Else:%s" (i) n lblTh lblEl;
   let rec get_index_of_blk lbl i n =
-    if i>n+1 then
+    if i>n+1 || i>=Array.length blk_arr then
       raise Not_parsed
     else
       let blk = Array.get blk_arr i in
@@ -2645,6 +2764,7 @@ and parse_ifelse (blk_arr, vars, f) (lblTh, lblEl, (i,n)) =
 
 and parse_ifonly (blk_arr, vars, f) (lblTh, lblEl, (i,n)) =
   F.dbgf "IF" "---->Trying If Only (%d,%d) Then:%s End:%s" (i) n lblTh lblEl;
+  F.dbgf "GRA" "*** Cond (i+j:%d, n:%d, then:%s, end:%s)" i n lblTh lblEl;
   let f k =
     F.dbgf "IF" "---->Trying Progressive (%d,%d)" k n;
 
@@ -2656,17 +2776,23 @@ and parse_ifonly (blk_arr, vars, f) (lblTh, lblEl, (i,n)) =
         begin
           next_lbl_is blk_arr lblEl (k+1,n);
           F.dbgf "IF" "---->IF ONLY parse succeeded";
+          F.dbgf "GRA" "*** BR (k:%d, end:%s)" k lblEl;
+          F.dbgf "GRA" "*** LBL (k+1:%d, end:%s)" (k+1) lblEl;
+          
           Some ((i,k), (n,i-1), (k+1,n), [inst1], lblEl)
       end
       else if lblEn = lblTh then
         begin
           next_lbl_is blk_arr lblTh (k+1,n);
           F.dbgf "IF" "---->IF ONLY parse succeeded";
+          F.dbgf "GRA" "*** BR (k:%d, end:%s)" k lblEl;
+          F.dbgf "GRA" "*** LBL (k+1:%d, end:%s)" (k+1) lblEl;
           Some ((i,k), (n,i-1), (k+1,n), [inst1], lblEl)
         end
       else
         begin
-          F.dbgf "IF" "---->IF ONLY parse failed";
+          
+          F.dbgf "IF" "---->IF ONLY parse failed (%s)" lblEn;
           raise Not_parsed
         end
     with
@@ -2685,6 +2811,7 @@ and parse_ifonly (blk_arr, vars, f) (lblTh, lblEl, (i,n)) =
 
 and parse_if ((blk_arr, vars, f) as dpkg) (pre_seg, (i,n), instrs, _A, pss, lblTh, lblEnEl) =
   F.dbgf "IF" "--->Trying If";
+  
   let r = parse_or dpkg [parse_ifelse; parse_ifonly] (Some (lblTh, lblEnEl, (i,n))) in
   match r with
     Some (then_seg', else_seg, rest_seg, dl_insts, lblEl) ->
@@ -2711,6 +2838,7 @@ and parse_if ((blk_arr, vars, f) as dpkg) (pre_seg, (i,n), instrs, _A, pss, lblT
        raise Not_parsed
 
 and parse_phi ((blk_arr, vars, f) as dpkg) (pre_seg, (i',n), instrs, _A, pss, lblTh, lblEn) =
+  
   F.dbgf "PHI" "--->Trying Phi i:%d n:%d Then:%s End:%s" (i'-1) n lblTh lblEn;           (** snd pre_seg + 1 = i' *)
   let i = i' - 1 in                                           (** snd pre_seg = i *)
   let p0_blk = Array.get blk_arr i in
@@ -2743,7 +2871,7 @@ and parse_phi ((blk_arr, vars, f) as dpkg) (pre_seg, (i',n), instrs, _A, pss, lb
           | Some (ps, phi_inst, BX.UNIT (x, V.Op.NE, y), exp2) ->
              F.dbgf "PHI" "--->inst2: %s" (stv inst2);
              if !non_pattern then remove_instructions (inst2::instrs);
-             let bexp  = if x=y then BX.OP (_A, V.Op.AND, exp2) else BX.OP (BX.complement _A, V.Op.OR, exp2) in
+             let bexp = if x=y then BX.OP (_A, V.Op.AND, exp2) else BX.OP (BX.complement _A, V.Op.OR, exp2) in
                F.dbgf "PHI" "--->bexp: %a" BX.fstr bexp;
                F.dbgf "PHI" "--->phi_instr: %s" (stv phi_inst);
                phis := !phis @ [(phi_inst, bexp)];
@@ -2973,9 +3101,9 @@ and parse_complex_cond ((blk_arr, vars, f) as dpkg) (i,n) =
                 end
            in
            match  compact mbrs' with
-             (lbl, (_A,lblT,lblF))::[] ->
+             (lbl, (_A,_,_))::[] ->
               F.dbgf "IF" "---->After compaction";
-              F.dbgf "IF" "---->i':%d %s:[%a, %s, %s]" i' lbl BX.fstr _A lblT lblF;
+              F.dbgf "IF" "---->i':%d %s:[%a, %s, %s]" i' lbl BX.fstr _A lblTT lblFF;
               (i', pss, instrs, _A, lblTT, lblFF)
            | _ -> raise Not_parsed
          end
@@ -2988,7 +3116,8 @@ and parse_cond ((blk_arr, vars, f) as dpkg) (init_seg, (i,n)) = (** snd init_seg
   
   F.dbgf "IF" "-->BR %s %s @ %d" lblTh lblEnEl i';
   F.dbgf "IF" "-->A:%a" BX.fstr _A;
-  parse_or dpkg [parse_phi; parse_if; assert_fail] (Some (init_seg, (i',n), instrs, _A, pss, lblTh, lblEnEl)) 
+  
+  parse_or dpkg [(* parse_phi; *) parse_if; assert_fail] (Some (init_seg, (i',n), instrs, _A, pss, lblTh, lblEnEl)) 
   
 
 and parse_program (dpkg:pkg) (i,n) : E.attr list VR.t * B.t =
@@ -3022,6 +3151,7 @@ and parse_program (dpkg:pkg) (i,n) : E.attr list VR.t * B.t =
   | Some r -> r
 ;;
 
+(* 
 let convert_struct =
   (fun (snm, flds) ->
     let e_flds = List.mapi (fun i fld_ty ->
@@ -3031,6 +3161,7 @@ let convert_struct =
                    ) flds in
     (F.corr_structname snm, e_flds, None)
     )
+ *)
 
 let lbl_to_funcs (blk_arr, vars, f) n =
   init_blk_to_idx blk_arr 0 n;
@@ -3050,7 +3181,7 @@ let parse_func vars' name f =
   blk_to_idx := VR.empty;
   unnamed_param := VR.empty ;
   mv_set := LA.get_all_mvs name f;
-  
+    
   let blk_arr = Llvm.basic_blocks f in
   
   current_func := name;
@@ -3059,7 +3190,6 @@ let parse_func vars' name f =
   F.dbgf "DEB" "vars: %a" (F.fstrL F.fstrId ",") (VR.bindings vars' |> List.map fst);
   
   let n = (Array.length blk_arr - 1) in
-  
   if n = -1 then
     vars', Procedure.mk_procedure name [] (B.enblock B.SKIP)
   else
@@ -3072,9 +3202,10 @@ let parse_func vars' name f =
                                _vars',  acc@[a']
                              with
                                ARG ->
-                                F.pn (stv a);
                                 let fv = B.fresh_var [] in
-                                unnamed_param := VR.add (stv a) fv !unnamed_param; 
+                                unnamed_param := VR.add (stv a) fv !unnamed_param;
+                                B.add_to_declared fv;
+                                (* E.pprint fv; F.pn (stv a); *)
                                 _vars, acc@[fv]
                              | e ->
                                 raise e
@@ -3086,12 +3217,14 @@ let parse_func vars' name f =
           VR.add continue [] @@ VR.add break [] vars'' in
       let pkg : pkg = (blk_arr, vars'3, f) in
       init_blk_to_idx blk_arr 0 n;
-      let vars'3, b =
+      let p0 = B.decl from_blk 1 in
+      let vars'3, b' =
         if !non_pattern then
           lbl_to_funcs pkg n
         else
           parse_program pkg (0, n) in
-      let structs = List.fold_left (fun ss ((snm,flds) as s) -> VR.add (F.corr_structname snm) (convert_struct s) ss) VR.empty !structures in      
+      let b = B.join_at_last b' p0 in
+      let structs = get_structures () in      
       let b =
         if !non_pattern then
           begin
@@ -3111,7 +3244,7 @@ let parse_func vars' name f =
           b
       in
       (* aux_funcs := aux_fs; *)
-      
+      F.pf_s "RESTORE" (B.pprint 0) b;
       let _, b' = B.restore_prog structs b in
       
       let p = Procedure.mk_procedure name prms (B.enblock b') in
@@ -3124,7 +3257,7 @@ let parse_func vars' name f =
 
 let translate_structures gs =
   let g_structures : G.t list =
-    List.map convert_struct !structures |> List.map (fun x -> G.STRUCT (x, B.dl)) in
+    (VR.bindings @@ get_structures () |> List.map snd) |> List.map (fun x -> G.STRUCT (x, B.dl)) in
   gs @ g_structures
 ;;
 
@@ -3197,10 +3330,13 @@ let translate file =
   else
     F.dbgf "DEB" "Single function mode: %s" !one_func;
 
+  F.pf_s "ALLFUNCTION" (L.iter_functions (fun f -> if L.is_declaration f then () else  let _, name = get_var vars' f in E.pprint name; F.pn "")) llm;
   
   let _, fs, _ = L.fold_left_functions (fun (_vars, acc, i) f ->
                      let vars', name = get_var _vars f in
-
+                     if L.is_declaration f then
+                       (_vars, acc, i+1)
+                     else
                      if !one_func <> "" then
                        if E.var_decode name = !one_func then 
                          try
@@ -3242,5 +3378,6 @@ let translate file =
                   ) "\n") gs3; 
   let gs    = translate_structures gs3 in
   
-  F.pf_s "SLAC" (List.iter (fun g -> Global.pprint g)) gs;
+  F.pf_s "SLAC" (List.iter (function Global.PROC _ as g -> Global.pprint g | _ -> ())) gs;
+  F.pf_s "STRUCT" (List.iter (function Global.STRUCT _ as g -> Global.pprint g | _ -> ())) gs;
   gs
