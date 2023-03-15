@@ -498,7 +498,7 @@ let split delim (str : string) : string list =
 ;;
 
 let corr_structname s =
-  String.map (function '.' -> '_' | c -> c) s
+  String.map (function '.' | '$' | '<' | '>' | ':' | ',' -> '_' | c -> c) s
 
 let corr_fieldname f =
   let i =  Char.code (String.get f 0) in

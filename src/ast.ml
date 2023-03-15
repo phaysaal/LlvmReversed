@@ -17,7 +17,6 @@ type imm_op =
     IVar of string
   | IInt of int [@@deriving sexp]
 
-          (*
 type lhs =
   | Var of string
   | Const of int
@@ -29,22 +28,20 @@ type lhs =
   | Nondet of RefinementTypes.symbolic_refinement option
   | Read of string * string
   | LengthOf of string
-  | Null *)
+  | Null
 
 type patt =
   | PVar of string
   | PTuple of patt list
   | PNone
-(*
+
 type relation = {
   rop1: imm_op;
   cond: string;
   rop2: imm_op
-} *)
-
+}
 
 type position = int * Lexing.position
-
 
 type src_ap =
   | AVar of string
@@ -52,7 +49,6 @@ type src_ap =
   | ADeref of string
   | APtrProj of string * int
 
-                           (*
 type raw_exp =
   | EVar of string
   | Cond of string * exp * exp
@@ -63,10 +59,9 @@ type raw_exp =
   | Let of patt * lhs * exp
   | Alias of string * src_ap * exp
   | Assert of relation * exp
-  | EAnnot of (string (* * RefinementTypes.src_typ *)) list * exp
+  | EAnnot of (string * RefinementTypes.src_typ) list * exp
 and exp = position * raw_exp
 
 type fn = { name: string; args: (string list); body: exp }
 
-type prog = fn list * exp *)
-
+type prog = fn list * exp

@@ -26,6 +26,36 @@ let checkdir s =
   ()
 ;;
 
+(*
+let manage_dirs () =
+  let endslash s = String.sub s (String.length s - 1) 1 = "/" in
+  let ifslash s = if endslash s then String.sub s 0 (String.length s - 1) ^ "_LlvmRev/" else s ^ "_LlvmRev/" in
+  
+  root_dir := Sys.argv.(1);
+  let lr_dir = ifslash !root_dir in
+  let slac_dir = lr_dir ^ "SlacData/" in
+  
+  if Sys.file_exists lr_dir then
+    begin
+      let _ = Sys.command ("rm -r " ^ lr_dir) in
+      ()
+    end;
+  comp_dir := slac_dir ^ "LLVM/";
+  trans_dir := slac_dir ^ "Translated/";
+  T.func_dir := !trans_dir ^ "func/";
+  compacted_dir := !trans_dir ^ "Compacted/";
+  transformed_dir := !trans_dir ^ "FPTransformed/";
+
+  checkdir lr_dir;
+  checkdir slac_dir;
+  checkdir !comp_dir;
+  checkdir !trans_dir;
+  checkdir !T.func_dir;
+  checkdir !compacted_dir;
+  checkdir !transformed_dir;
+  ()
+;; *)
+
 let manage_dirs () =
   let endslash s = String.sub s (String.length s - 1) 1 = "/" in
   let ifslash s = if endslash s then String.sub s 0 (String.length s - 1) ^ "_LlvmRev/" else s ^ "_LlvmRev/" in
@@ -87,11 +117,23 @@ let parse_args () =
     if i < l then
       let d = Array.get Sys.argv i in
       match d with
-      | "-np" ->
+      (* | "-np" ->
          T.non_pattern := true;
-         aux (i+1)
+         aux (i+1) *)
       | "-t" ->
          V.Options.show_types := true;
+         aux (i+1)
+      (* | "-nf" ->
+         SlacToConsort.show_not_found_function := true;
+         aux (i+1) *)
+      | "-skipnf" ->
+         SlacToConsort.skip_not_found_function := true;
+         aux (i+1)
+      | "-exc" ->
+         Trans.exception_mode := true;
+         aux (i+1)
+      | "-llvmslice" ->
+         Trans.llvm_slice := true;
          aux (i+1)
       | _ -> 
          if i < l-1 then  
@@ -116,16 +158,28 @@ let parse_args () =
       ()
   in
   aux 1
-
+;;
+(*
 let compile_a_cpp_file (path, file) =
-  (* let extra =
+  let extra =
     let rec aux i =
       if i < Array.length Sys.argv then
         Sys.argv.(i) ^ " " ^ (aux (i+1))
       else
         ""
     in
-    aux 2 in *) 
+    aux 2 in 
+  let str_cmd = "clang -fno-discard-value-names -emit-llvm " ^ extra ^ " -o " ^ !comp_dir ^ file ^ ".bc -c " ^ path in
+  T.pf "%s\n" str_cmd;
+  let r = Sys.command str_cmd in
+  if r = 0 then
+    file ^ ".bc"
+  else
+    raise (Err "clang command not successfull")
+;;
+ *)
+
+let compile_a_cpp_file (path, file) =
   let str_cmd = "clang -fno-discard-value-names -O0 -emit-llvm -o " ^ !comp_dir ^ file ^ ".bc -c " ^ path in
   T.pf "%s\n" str_cmd;
   let r = Sys.command str_cmd in
@@ -163,6 +217,9 @@ let get_all_C_files curdir =
   aux (curdir, curdir)
 ;;
 
+(* let compile () =
+  get_all_C_files !root_dir 
+;; *)
 let compile () =
   if !bc_mode then
     begin
@@ -180,7 +237,6 @@ let write_file i filename fullpath globals structures =
   let ffile = !trans_dir ^ "/" ^ flattenpath in
   let module_id = i in
   let _Fmod : t = (filename, fullpath, globals, structures, false, V.Formula.empty, VV.empty) in
-  F.pn ""; F.pn ffile;
   F.write_file ffile (module_id, _Fmod);
 ;;
 
@@ -232,14 +288,12 @@ let _ =
     
     let gs = translate llvm_files in
     T.pf "Translation to SLAC C is finished\n";
-    T.pf "Total number of globals: %d" (List.length gs);
 
     let consort = try CONF.find "CONSORT" !conf with Not_found -> "" in
     let consortoutdir = try CONF.find "CONSORTOUTDIR" !conf with Not_found -> "" in
     List.iter (fun (f, g) ->
-                SlacToConsort.print_consort consort (consortoutdir ^ f) g) gs
+                SlacToConsort.translate_to_consort consort (consortoutdir ^ f) g) gs
   with
     e ->
-    T.pf "Exception from main\n"; raise e
+    T.pf "Exception\n"; raise e
 ;;
-

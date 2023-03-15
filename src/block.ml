@@ -9,6 +9,8 @@ module L = Locs
 
 exception Err of string
 
+
+
 type init = INIT_E | INIT_S of Term.t | INIT_M of init list
 type t =
   | SKIP
@@ -17,25 +19,16 @@ type t =
   | IF of B.t * t * t * t * L.t
   | WHILE of B.t * B.t list * t * F.t * t * L.t
   | PROCCALL of Exp.t option * Term.t * Term.t list * int * t * Locs.t
-  | CONS of Exp.t * (Exp.t * Term.t) list * t * Locs.t  (** Name, fields, rest *)
   | MALLOC of Exp.t * Exp.t * t * Locs.t (** Name, Length, rest *)
-  | SARRAY of Exp.t * Term.t * (Exp.t * Term.t) list * t * Locs.t (** Name, Length, rest *)
   | MUTATION of Term.t * Field.t * Term.t * t * Locs.t
   | LOOKUP of Exp.t * Term.t * Field.t * t * Locs.t
   | DISPOSE of Term.t * t * Locs.t
-  | MAPS of Exp.t * Exp.t * t * Locs.t
-  | PARALLEL of t * t * t * Locs.t
   | BLOCK of t * t * Locs.t
   | DECL of Exp.t * Exp.t list * init * t * Locs.t
   | RETURN of Term.t * t * Locs.t
-  | LABEL of string * string list * t * Locs.t
-  | BREAK of t * Locs.t
-  | CONTINUE of t * Locs.t
-  | FAIL
 ;;
 
 let noop = ref false
-
 
 let extra sl =
   match (String.length sl) with
@@ -99,13 +92,6 @@ let rec pprint t = function
        pn ";";
        pprint t y
      end
-  | CONTINUE (y, l) ->
-     begin
-       printl l;
-       pt "continue" t;
-       pn ";";
-       pprint t y
-     end
   | BLOCK (a, y, l) ->
      printl l;
      pt "{" t;
@@ -114,7 +100,8 @@ let rec pprint t = function
      (* p (extra ""); *)
      pt "}" t;
      pn "";
-     pprint t y
+     pprint t y;
+     pt "" t;
   | DECL (a, len, init_data, y, l) ->
      begin
        printl l;
@@ -180,18 +167,6 @@ let rec pprint t = function
        p "; //"; pi i;
        pprint t y
      end
-  | CONS (a, b, y, l) ->
-     begin
-       printl l;
-       pt "" t;
-       Exp.pprint a;
-       pw " = cons(";
-       iterS (fun (a,b)-> Exp.pprint a;
-                          p ":"; Term.pprint b) ", " b;
-       p " )";
-       pn ";";
-       pprint t y
-     end
   | MUTATION (a, b, c, y, l) ->
      begin
        printl l; pt "" t;
@@ -228,8 +203,6 @@ let rec pprint t = function
        pprint t y
      end
   | DISPOSE (a, y, l) -> begin printl l; pt "dispose(" t; Term.pprint a; p ")"; pn ";"; pprint t y end
-  | MAPS (a, b, y, l) -> begin printl l; pt "" t; Exp.pprint a; p " : "; Exp.pprint b; pn ";"; pprint t y end
-  | PARALLEL (b, c, y, l) -> begin printl l; pt "parallel" t; pn "{"; pprint (t+1) b; p (extra ""); pt "}{" t; pn ""; pprint (t+1) c; p (extra ""); pt "}" t; pn ""; pprint t y end
   | MALLOC (a, tl, y, l) ->
      begin
        printl l;
@@ -239,21 +212,129 @@ let rec pprint t = function
        pn " );";
        pprint t y
      end
-  | SARRAY (a, b, tl, y, l) ->
-     begin
-       printl l; pt "" t; Exp.pprint a; p " = SARRAY(";  Term.pprint b; p ")";
-       if tl != [] then 
-         begin
-           p "=["; iterS (fun (_, t)->Term.pprint t) "," tl;
-           p "]"
-         end;
-       pn ";";
-       pprint t y end
-  | LABEL (l, el, y, ll) -> printl ll; pt ("LABEL " ^ l  ^ "(") t; iterS pw "," el; pn ");"; pprint t y
-  | BREAK (y, ll) -> printl ll; pt "BREAK" t; pn ";"; pprint t y
-  | FAIL -> p "   "; pt "fail" (t+1); pn ";"
 ;;
 
+
+let rec solo_print t = function
+  | SKIP -> p "SKIP\n"
+  | ASSERT (b, y, l) -> begin
+       printl l;
+       pt "assert(" t;
+       (iterS BExp.pprint " && ") ((fun (_,b,_,_) -> b) (List.hd b));
+       pn ");"
+     end
+  | RETURN (i, y, l) ->
+     begin
+       printl l;
+       pt "return " t;
+       Term.pprint i;
+       pn ";";
+     end
+  | BLOCK (a, _, l) ->
+     printl l;
+     pt "{" t;
+     pn "";
+     pprint (t+1) a;
+     (* p (extra ""); *)
+     pt "}" t;
+     pn "";
+  | DECL (a, len, init_data, _, l) ->
+     printl l;
+     
+     pt (string_of_decl a len) t;
+     if init_data <> INIT_E then p " = ";
+     print_init init_data;
+     pn ";";
+  | ASSIGN (a, b, y, l) ->
+     begin
+       printl l;
+       pt "" t;
+       Exp.pprint a;
+       p " = ";
+       Term.pprint b;
+       pn ";";
+     end
+  | IF (a, b, c, _, l) -> begin
+      let tb = match b with BLOCK _ -> t | _ -> t+1 in
+      let tc = match c with BLOCK _ -> t | _ -> t+1 in
+      printl l; pt "if(" t; BExp.pprint a; pn ")"; pprint tb b; printl l; 
+      begin
+        match c with
+          BLOCK (SKIP, _, _) -> pt "\n" t
+        | _ ->
+           pt "else\n" t; pprint tc c
+      end;
+    end
+  | WHILE (a, bs, b, c, _, l) ->
+     begin
+       printl l;
+       pt "while(" t;
+       BExp.pprint a;
+       p ")" ;
+       (*if List.length bs > 0 then
+         (iterS BExp.pprint "&" bs)
+       else
+         pw "{True}"; *)
+       pn "";
+       pprint t b;
+     end
+  | PROCCALL (z, a, b, i, y, l) ->
+     begin
+       printl l;
+       pt "" t;
+       (match z with
+         None -> ()
+       | Some e -> Exp.pprint e; p " = ");
+       Term.pprint a;
+       pw "(";
+       iterS Term.pprint ", " b;
+       p " )";
+       p "; //"; pi i;
+     end
+  | MUTATION (a, b, c, y, l) ->
+     begin
+       printl l; pt "" t;
+       if b <> "*" then
+         begin
+           Term.pprint a;
+           p "->"; p (corr_fieldname b)
+         end
+       else
+         begin
+           p "*("; Term.pprint a;  p ")"
+         end;
+       pw " =";
+       Term.pprint c; pn ";";
+      end
+  | LOOKUP (a, b, c, y, l) ->
+     begin
+       printl l;
+       pt "" t;
+       Exp.pprint a;
+       p " = ";
+       if c <> "*" then
+         begin
+           Term.pprint b;
+           p "->";
+           pw (corr_fieldname c)
+         end
+       else
+         begin
+           p "*("; Term.pprint b; p ")"
+         end;
+       pn ";";
+     end
+  | DISPOSE (a, y, l) -> begin printl l; pt "dispose(" t; Term.pprint a; p ")"; pn ";"; end
+  | MALLOC (a, tl, y, l) ->
+     begin
+       printl l;
+       pt "" t;
+       Exp.pprint a;
+       p " = MALLOC( "; Exp.pprint tl;
+       pn " );";
+       
+     end
+;;
 
 let dl = ("", 0) ;;
 let null = T.NULL ;;
@@ -263,7 +344,7 @@ let corr_id v =
   (* let mx = 300 in *)
   let v' =
     if String.contains v '.' then
-      String.map (function '.' -> '_' | '$' -> '_' | c -> c) v
+      String.map (function '.' | ':' | '$' -> '_' | c -> c) v
     else
       v
   in
@@ -276,8 +357,20 @@ let corr_id v =
   v''
 ;;
 
+module CString = struct
+  type t = Str of string
+
+  let compare (Str x) (Str y) = String.compare x y
+
+  let t s = Str (corr_id s)
+
+  let f (Str s) = s
+end
+
 let var x attr = E.VAR (corr_id x, attr) ;;
 let ret attr = var "__RET__" attr |> _T;;
+
+let global_exception = var "__GLOBAL_EXCEPTION__" [] ;;
 
 let fresh = ref 0;;
 
@@ -288,7 +381,6 @@ let fresh_var attr =
   r
 ;;
 
-
 let op s = match s with
   | _ -> raise (Err s)
 ;;
@@ -296,34 +388,30 @@ let const i = E.CONST i ;;
 let constf i = E.FLOAT i ;;
 let bin e1 op e2 = E.BINOP (e1, op, e2) ;;
 let add e1 e2 = bin e1 Op.ADD e2 ;;
-let return e =
-  let p = RETURN (e, SKIP, dl) in
+let return ?(exc=T.zero) is_exc e =
+  let p = if is_exc then
+            ASSIGN (global_exception, T.zero, RETURN (e, SKIP, dl), dl)
+          else
+            RETURN (e, SKIP, dl)
+  in
   (* pprint 0 p; *)
   p
 ;;
 
 let rec join_at_last last = function
     | SKIP -> last
-    | FAIL -> FAIL
     | ASSIGN (a, b, y, l) -> ASSIGN (a, b, join_at_last last y, l)
     | ASSERT (a, y, l) -> ASSERT (a, join_at_last last y, l)
     | IF (a, b, c, y, l) -> IF (a, b, c, join_at_last last y, l)
     | WHILE (a, bs, b, c, y, l) -> WHILE (a, bs, b, c, join_at_last last y, l)
     | PROCCALL (z, a, b, i, y, l) -> PROCCALL (z, a, b, i, join_at_last last y, l)
-    | CONS (a, b, y, l) -> CONS (a, b, join_at_last last y, l)
     | MUTATION (a, b, c, y, l) -> MUTATION (a, b, c, join_at_last last y, l)
     | LOOKUP (a, b, c, y, l) -> LOOKUP (a, b, c, join_at_last last y, l)
     | DISPOSE (a, y, l) -> DISPOSE (a, join_at_last last y, l)
     | MALLOC (a, tl, y, l) -> MALLOC (a, tl, join_at_last last y, l)
-    | SARRAY (a, b, tl, y, l) -> SARRAY (a, b, tl, join_at_last last y, l)
-    | MAPS (a, b, y, l) -> MAPS (a, b, join_at_last last y, l)
-    | PARALLEL (b, c, y, l) -> PARALLEL (b, c, join_at_last last y, l)
     | BLOCK (a, y, l) -> BLOCK (a, join_at_last last y, l)
     | DECL (a, len, init_data, y, l) -> DECL (a, len, init_data, join_at_last last y, l)
-    | RETURN (i, y, l) -> RETURN (i, join_at_last last y, l)
-    | BREAK (y, l) -> BREAK (join_at_last last y, l)
-    | CONTINUE (y, l) -> CONTINUE (join_at_last last y, l)
-    | LABEL (lbl, el, y, l) -> LABEL (lbl, el, join_at_last last y, l)
+    | RETURN (i, y, l) -> RETURN (i, SKIP, l)
 ;;
 
 module S = Set.Make(Exp)
@@ -343,7 +431,6 @@ let rec fv_of_init = function
 
 let rec mod_free_var = function
     | SKIP -> S.empty, S.empty
-    | FAIL -> S.empty, S.empty
     | ASSIGN (a, b, y, l) ->
        let ms, fs = mod_free_var y in
        S.add a ms, S.union (S.add a (from_list @@ T.fv b)) fs
@@ -367,9 +454,6 @@ let rec mod_free_var = function
          | Some z' -> S.add z' ms,
                       List.map T.fv b |> List.concat |> from_list |> S.union fs |> S.add z'
        end
-    | CONS (a, b, y, l) ->
-       let ms, fs = mod_free_var y in
-       ms, S.add a fs
     | MUTATION (a, b, c, y, l) ->
        let ms, fs = mod_free_var y in
        ms, S.union (T.fv a @ T.fv c |> from_list) fs
@@ -381,12 +465,6 @@ let rec mod_free_var = function
     | MALLOC (a, tl, y, l) ->
        let ms, fs = mod_free_var y in
        ms, S.add a fs
-    | SARRAY (a, b, tl, y, l) ->
-       mod_free_var y
-    | MAPS (a, b, y, l) ->
-       mod_free_var y
-    | PARALLEL (b, c, y, l) ->
-       mod_free_var y
     | BLOCK (a, y, l) ->
        let ms, fs = mod_free_var y in
        let ms1, fs1 = mod_free_var a in
@@ -401,12 +479,6 @@ let rec mod_free_var = function
     | RETURN (i, y, l) ->
        let ms, fs = mod_free_var y in
        ms, S.union (T.fv i |> from_list) fs
-    | BREAK (y, l) ->
-       mod_free_var y
-    | CONTINUE (y, l) ->
-       mod_free_var y
-    | LABEL (lbl, el, y, l) ->
-       mod_free_var y
 ;;
 
 module Proc = Set.Make(String)
@@ -414,22 +486,14 @@ module Proc = Set.Make(String)
 let rec get_func_call stmt =
   match stmt with
   | SKIP -> Proc.empty
-  | FAIL -> Proc.empty
   | ASSIGN (_, _, y, _)
     | ASSERT (_, y, _)
-    | CONS (_, _, y, _)
     | MUTATION (_, _, _, y, _)
     | LOOKUP (_, _, _, y, _)
     | DISPOSE (_, y, _)
     | MALLOC (_, _, y, _)
-    | SARRAY (_, _, _, y, _)
-    | MAPS (_, _, y, _)
-    | PARALLEL (_, _, y, _)
     | DECL (_, _, _, y, _)
-    | RETURN (_, y, _)
-    | BREAK (y, _)
-    | CONTINUE (y, _)
-    | LABEL (_, _, y, _) ->
+    | RETURN (_, y, _) ->
        get_func_call y
   | IF (_, b, c, y, _) ->
      Proc.union (Proc.union (get_func_call b) (get_func_call c)) (get_func_call y)
@@ -447,8 +511,11 @@ let declared = ref [] ;;
 let decl x ty =
   match x with
     E.VAR _ ->
-    let p = if ty = 1 then
+    let p = if ty = 1 && not (E.is_array x) then
               DECL (x, [], INIT_E, SKIP, dl)
+            else if ty = 1 then
+              let l = E.get_array_length x in
+              DECL (x, l, INIT_E, SKIP, dl)
             else
               DECL (x, [const ty], INIT_E, SKIP, dl)
     in
@@ -529,8 +596,14 @@ let lookup x e f =
 ;;
 
 let call ?(ret=None) x fs =
-  let p = PROCCALL (ret, x, fs, 0, SKIP, dl) in
-  p
+  match ret with
+    None ->
+    let p = PROCCALL (ret, x, fs, 0, SKIP, dl) in
+    p
+  | Some r ->
+     let ps = decl_all [r] in
+     let p = PROCCALL (ret, x, fs, 0, SKIP, dl) in
+     join_at_last p ps
 ;;
 
 let block b =
@@ -600,7 +673,6 @@ let rec substitute u t p =
   in
   match p with
   | SKIP -> p
-  | FAIL -> p
   | ASSIGN (a, b, y, l) ->
      ASSIGN (subs_e a, subs_t b, subs y, l)
   | ASSERT (a, y, l) ->
@@ -611,8 +683,6 @@ let rec substitute u t p =
      WHILE (subs_b a, bs, subs b, c, subs y, l)
   | PROCCALL (z, a, b, i, y, l) ->
      PROCCALL (subs_op z, a, List.map subs_t b, i, subs y, l)
-  | CONS (a, b, y, l) ->
-     CONS (subs_e a, b, subs y, l)
   | MUTATION (a, b, c, y, l) ->
      MUTATION (subs_t a, b, subs_t c, subs y, l)
   | LOOKUP (a, b, c, y, l) ->
@@ -621,12 +691,6 @@ let rec substitute u t p =
      DISPOSE (subs_t a, subs y, l)
   | MALLOC (a, tl, y, l) ->
      MALLOC (subs_e a, subs_e tl, subs y, l)
-  | SARRAY (a, b, tl, y, l) ->
-     SARRAY (a, b, tl, subs y, l)
-  | MAPS (a, b, y, l) ->
-     MAPS (a, b, y, l)
-  | PARALLEL (b, c, y, l) ->
-     PARALLEL (b, c, y, l)
   | BLOCK (a, y, l) ->
      BLOCK (subs a, subs y, l)
   | DECL (a, len, init_data, y, l) ->
@@ -636,12 +700,6 @@ let rec substitute u t p =
        DECL (a, List.map subs_e len, subs_i init_data, subs y, l)
   | RETURN (i, y, l) ->
      RETURN (subs_t i, subs y, l)
-  | BREAK (y, l) ->
-     BREAK (subs y, l)
-  | CONTINUE (y, l) ->
-     CONTINUE (subs y, l)
-  | LABEL (lbl, el, y, l) ->
-     LABEL (lbl, el, subs y, l)
 
 let addfvs s fvs =
   S.union s (S.of_list fvs)
@@ -651,11 +709,14 @@ let addfv (r,s) fvs =
   (r, addfvs s fvs)
 ;;
 
+let get_declared_var = function
+    DECL (v, _,_,_,_) -> [v]
+  | _ -> []
+
 let restore_prog structures p =
   let rec restore_prog locals p =
     match p with
     | SKIP -> (S.empty, S.empty), p
-    | FAIL -> (S.empty, S.empty), p
     | ASSIGN (a, T.EXP ((E.VAR _) as b), y, l) when E.is_ptr a && E.is_ptr b && E.is_param b ->
        let y' = substitute a b y in
        let (r,s), y'' = restore_prog locals y' in
@@ -678,24 +739,23 @@ let restore_prog structures p =
                 BLOCK ((ASSIGN(x2, T.EXP (E.CONST 0),SKIP,_) as p2), SKIP, _),
                 ASSIGN (from_blk, blk, y, l1), l),d3) when x1=x2 && x=x1 ->
        begin match y with
-         WHILE (b, _, _, _, _, _) |
-         IF (b, _, _, _, _) |
-           ASSERT ((_,b::_,_,_)::_, _, _)  when a=b ->
+       | WHILE (b, _, _, _, _, _) |
+           IF (b, _, _, _, _) |
+             ASSERT ((_,b::_,_,_)::_, _, _)  when a=b ->
           let y1 = ASSIGN (from_blk, blk, y, l1) in
           let (r, s), y' = restore_prog locals y1 in
-          
           if E.is_global x1 || E.is_param x1 || S.mem x1 s then
             let s' = S.add x s in
             (r, addfvs s' (B.fv a)), DECL (x, d1, d2, IF (a, p1, p2, y', l), d3)
           else
             (r,s), y'
-         | _ ->
-            let y1 = ASSIGN (from_blk, blk, y, l1) in
-            let (r, s), y' = restore_prog locals y1 in
-          
-            let s' = S.add x s in
-            (r, addfvs s' (B.fv a)), DECL (x, d1, d2, IF (a, p1, p2, y', l), d3)
-            
+       | SKIP ->
+          (S.empty, S.empty), ASSIGN (from_blk, blk, SKIP, l1)
+       | _ ->
+          let y1 = ASSIGN (from_blk, blk, y, l1) in
+          let (r, s), y' = restore_prog locals y1 in
+          let s' = S.add x s in
+          (r, addfvs s' (B.fv a)), DECL (x, d1, d2, IF (a, p1, p2, y', l), d3)
        end
     | IF (a, b, c, y, l) ->
        (* let nn = !noop in
@@ -729,9 +789,6 @@ let restore_prog structures p =
             (* else
               (r, addfvs s fv_b), PROCCALL (None, a, b, i, y', l) *)
        end
-    | CONS (a, b, y, l) ->
-       let r, y' = restore_prog locals y in
-       r, CONS (a, b, y', l)
     | MUTATION (a, b, c, y, l) ->
        let r, y' = restore_prog locals y in
        addfv r (T.fv a @ T.fv c), MUTATION (a, b, c, y', l)
@@ -748,15 +805,6 @@ let restore_prog structures p =
     | MALLOC (a, tl, y, l) ->
        let r, y' = restore_prog locals y in
        addfv r (a::E.fv tl), MALLOC (a, tl, y', l)
-    | SARRAY (a, b, tl, y, l) ->
-       let r, y' = restore_prog locals y in
-       r, SARRAY (a, b, tl, y', l)
-    | MAPS (a, b, y, l) ->
-       let r, y' = restore_prog locals y in
-       r, MAPS (a, b, y', l)
-    | PARALLEL (b, c, y, l) ->
-       let r, y' = restore_prog locals y in
-       r, PARALLEL (b, c, y', l)
     | BLOCK (BLOCK (a, SKIP, l), y, _)
     | BLOCK (a, y, l) ->
        let (r1,s1), a' = restore_prog [] a in
@@ -778,74 +826,79 @@ let restore_prog structures p =
              (* else
                (r, s), y' *)
          in
-
-         if not !noop && init_data = INIT_E then
-           begin let is_not_in y = let _, fvs = mod_free_var y in
+         
+         if init_data = INIT_E then
+           begin
+             let is_not_in y = let _, fvs = mod_free_var y in
                                    not (S.mem a fvs) in
-                 
-           match y with
-             
-           | MALLOC (c1, tl,
-                     ASSIGN (p, c2, y, _), _) when a=c1 && c1=T.toExp c2 && is_not_in y ->
-              let tl =
-                if E.is_struct p then
-                  match tl with
-                    E.CONST n ->
-                     let m = E._struct_size structures p in
-                     let z = E.CONST (n/m) in
-                     let snm = E.get_struct_name p in
-                     E.BINOP (E.SIZEOF snm, Op.MUL, z)
-                  | _ ->
-                     tl
-                else
-                  tl
-              in
-              restore_prog locals (MALLOC (p, tl, y, l))
-           | IF (b,
-                 BLOCK (ASSIGN (c1, T.EXP(E.CONST 1), SKIP, _), SKIP, _),
-                 BLOCK (ASSIGN (c2, T.EXP(E.CONST 0), SKIP, _), SKIP, _),
-                 DECL (cv'', _, INIT_E,
-                       ASSIGN (cv', cp,
-                               ASSERT ([(_,[B.UNIT (cv, Op.NE, T.EXP (E.CONST 0))],[],[])],
-                                       y,_),_), _),
-                 _) when T.toExp cv=cv' && T.toExp cp=a && a=c1 && a=c2 && is_not_in y ->
-              restore_prog locals (ASSERT ([([],[b],[],[])],y,l))
-           | LOOKUP (a1, pt, fld,
-                     ASSIGN (c, a2, y, _), _) when a=a1 && a=T.toExp a2 && is_not_in y ->
-              let p = LOOKUP (c, pt, fld, y, l) in
-              
-              restore_prog locals (p)
-           | _ ->
-              deal_decl () end
+             match y with
+             | MALLOC (c1, tl,
+                       ASSIGN (p, c2, y, _), _) when a=c1 && c1=T.toExp c2 && is_not_in y ->
+              if E.toStr a = "call13" then
+                begin
+                  dbgf "RESTORE" "DECL %a" E.fstr a;
+                  if !noop then pn "noop:true" else pn "noop:false";
+                  if init_data = INIT_E then pn "init:<>" else pn "init:...";
+                end;
+                let tl =
+                  if E.is_struct p then
+                    match tl with
+                      E.CONST n ->
+                       let m = E._struct_size structures p in
+                       let z = E.CONST (n/m) in
+                       let snm = E.get_struct_name p in
+                       E.BINOP (E.SIZEOF snm, Op.MUL, z)
+                    | _ ->
+                       tl
+                  else
+                    tl
+                in
+                restore_prog locals (MALLOC (p, tl, y, l))
+             | _ ->
+                begin
+                  if not !noop then
+                    match y with
+                    | IF (b,
+                          BLOCK (ASSIGN (c1, T.EXP(E.CONST 1), SKIP, _), SKIP, _),
+                          BLOCK (ASSIGN (c2, T.EXP(E.CONST 0), SKIP, _), SKIP, _),
+                          DECL (cv'', _, INIT_E,
+                                ASSIGN (cv', cp,
+                                        ASSERT ([(_,[B.UNIT (cv, Op.NE, T.EXP (E.CONST 0))],[],[])],
+                                                y,_),_), _),
+                          _) when T.toExp cv=cv' && T.toExp cp=a && a=c1 && a=c2 && is_not_in y ->
+                       restore_prog locals (ASSERT ([([],[b],[],[])],y,l))
+                    | LOOKUP (a1, pt, fld,
+                              ASSIGN (c, a2, y, _), _) when a=a1 && a=T.toExp a2 && is_not_in y ->
+                       let p = LOOKUP (c, pt, fld, y, l) in
+                       
+                       restore_prog locals (p)
+                    | _ ->
+                       deal_decl ()
+                  else
+                    deal_decl ()
+                end
+           end
          else
            deal_decl ()
        end
     | RETURN (i, y, l) ->
        let r, y' = restore_prog locals y in
        addfv r (T.fv i), RETURN (i, y', l)
-    | BREAK (y, l) ->
-       let r, y' = restore_prog locals y in
-       r, BREAK (y', l)
-    | CONTINUE (y, l) ->
-       let r, y' = restore_prog locals y in
-       r, CONTINUE (y', l)
-    | LABEL (lbl, el, y, l) ->
-       let r, y' = restore_prog locals y in
-       r, LABEL (lbl, el, y', l)
   in
   restore_prog [] p
 
 
 let adjust_ptr vars p =
-  let module VR = Map.Make(String) in
+  let module VR = Map.Make(CString) in
 
   let term_to_ref b =
     let fvb = T.fv b in
     let pre, v_map =
          List.fold_left (fun (pre, v_map) v ->
              let vn, attr = E.decode v in
-             if VR.mem vn vars then
-               let attr' = VR.find vn vars in
+             let vn' = CString.t vn in
+             if VR.mem vn' vars then
+               let attr' = VR.find vn' vars in
                if not (E.is_ptr v) && List.mem E.PTR attr' then
                  let nv = fresh_var attr in
                  let p = lookup nv (_T v) "*" in
@@ -864,14 +917,14 @@ let adjust_ptr vars p =
   let rec adjust_ptr locals p =
     match p with
     | SKIP -> p
-    | FAIL -> p
     | ASSIGN (a, b, y, l) ->
        let y' = adjust_ptr locals y in
        let b', pre = term_to_ref b in
        let p =
          let an, attr = E.decode a in
-         if VR.mem an vars then
-           let attr' = VR.find an vars in
+         let an' = CString.t an in
+         if VR.mem an' vars then
+           let attr' = VR.find an' vars in
            if not (E.is_ptr a) && List.mem E.PTR attr' then
              join_at_last y' (mutation (_T a) "*" b') 
            else
@@ -895,9 +948,6 @@ let adjust_ptr vars p =
     | PROCCALL (z, a, b, i, y, l) ->
        let y' = adjust_ptr locals y in
        PROCCALL (z, a, b, i, y', l)
-    | CONS (a, b, y, l) ->
-       let y' = adjust_ptr locals y in
-       CONS (a, b, y', l)
     | MUTATION (a, b, c, y, l) ->
        let y' = adjust_ptr locals y in
        MUTATION (a, b, c, y', l)
@@ -910,15 +960,6 @@ let adjust_ptr vars p =
     | MALLOC (a, tl, y, l) ->
        let y' = adjust_ptr locals y in
        MALLOC (a, tl, y', l)
-    | SARRAY (a, b, tl, y, l) ->
-       let y' = adjust_ptr locals y in
-       SARRAY (a, b, tl, y', l)
-    | MAPS (a, b, y, l) ->
-       let y' = adjust_ptr locals y in
-       MAPS (a, b, y', l)
-    | PARALLEL (b, c, y, l) ->
-       let y' = adjust_ptr locals y in
-       PARALLEL (b, c, y', l)
     | BLOCK (a, y, l) ->
        let a' = adjust_ptr [] a in
        let y' = adjust_ptr locals y in
@@ -929,15 +970,6 @@ let adjust_ptr vars p =
     | RETURN (i, y, l) ->
        let y' = adjust_ptr locals y in
        RETURN (i, y', l)
-    | BREAK (y, l) ->
-       let y' = adjust_ptr locals y in
-       BREAK (y', l)
-    | CONTINUE (y, l) ->
-       let y' = adjust_ptr locals y in
-       CONTINUE (y', l)
-    | LABEL (lbl, el, y, l) ->
-       let y' = adjust_ptr locals y in
-       LABEL (lbl, el, y', l)
   in
   adjust_ptr [] p
 
@@ -953,7 +985,6 @@ let adjust_calls aux_calls fname p =
   let rec adjust_calls d p =
     match p with
     | SKIP -> p
-    | FAIL -> p
     | ASSIGN (a, b, y, l) ->
        let y' = adjust_calls d y in
        ASSIGN (a, b,y',l)
@@ -998,9 +1029,6 @@ let adjust_calls aux_calls fname p =
            Not_found ->
         PROCCALL (z, a, b, i, y', l)
        end
-    | CONS (a, b, y, l) ->
-       let y' = adjust_calls d y in
-       CONS (a, b, y', l)
     | MUTATION (a, b, c, y, l) ->
        let y' = adjust_calls d y in
        MUTATION (a, b, c, y', l)
@@ -1013,15 +1041,6 @@ let adjust_calls aux_calls fname p =
     | MALLOC (a, tl, y, l) ->
        let y' = adjust_calls d y in
        MALLOC (a, tl, y', l)
-    | SARRAY (a, b, tl, y, l) ->
-       let y' = adjust_calls d y in
-       SARRAY (a, b, tl, y', l)
-    | MAPS (a, b, y, l) ->
-       let y' = adjust_calls d y in
-       MAPS (a, b, y', l)
-    | PARALLEL (b, c, y, l) ->
-       let y' = adjust_calls d y in
-       PARALLEL (b, c, y', l)
     | BLOCK (a, y, l) ->
        let a' = adjust_calls d a in
        let y' = adjust_calls d y in
@@ -1032,15 +1051,6 @@ let adjust_calls aux_calls fname p =
     | RETURN (i, y, l) ->
        let y' = adjust_calls d y in
        RETURN (i, y', l)
-    | BREAK (y, l) ->
-       let y' = adjust_calls d y in
-       BREAK (y', l)
-    | CONTINUE (y, l) ->
-       let y' = adjust_calls d y in
-       CONTINUE (y', l)
-    | LABEL (lbl, el, y, l) ->
-       let y' = adjust_calls d y in
-       LABEL (lbl, el, y', l)
   in
   let p' = adjust_calls [] p in
   (* let aux_fs:'a = List.map (fun (a,b,(c,d,e)) ->
@@ -1050,42 +1060,36 @@ let adjust_calls aux_calls fname p =
 
 let rec ends_with_ret = function
     | SKIP -> false
-    | FAIL -> false
     | ASSIGN (_, _, y, _)
     | ASSERT (_, y, _)
     | IF (_, _, _, y, _)
     | WHILE (_, _, _, _, y, _)
     | PROCCALL (_, _, _, _, y, _)
-    | CONS (_, _, y, _)
     | MUTATION (_, _, _, y, _)
     | LOOKUP (_, _, _, y, _)
     | DISPOSE (_, y, _)
     | MALLOC (_, _, y, _)
-    | SARRAY (_, _, _, y, _)
-    | MAPS (_, _, y, _)
-    | PARALLEL (_, _, y, _)
     | DECL (_, _, _, y, _)
-    | BREAK (y, _) 
-    | CONTINUE (y, _)
-    | LABEL (_, _, y, _) ->
+      ->
        ends_with_ret y
     | BLOCK (y1, y2, _) ->
        ends_with_ret y1 || ends_with_ret y2
     | RETURN (_, _, _) ->
        true
     
-let call_to_ret attr = function
+let call_to_ret attr is_exc = function
   | PROCCALL (None, fn, args, i, y, l) ->
      let fv = fresh_var attr in
      let d  = decl fv 1 in
      let p  = PROCCALL (Some fv, fn, args, i, y, l) in
-     let r  = return @@ _T fv in
+     let r  = return is_exc @@ _T fv in
      block @@ join_progs [d;p;r]
   | PROCCALL (Some v, fn, args, i, y, l) as p ->
-     let r  = return @@ _T v in
+     let r  = return is_exc @@ _T v in
      block @@ join_progs [p;r]
   | p -> p
 
+    
 let ret_merge = function
     IF (b,
         BLOCK(
@@ -1117,26 +1121,18 @@ let ret_merge = function
        
 let rec traverse f f1 acc p =
   match p with 
-    SKIP
-    | FAIL -> acc
-  | ASSERT (_, p', _) 
+    SKIP -> acc
+   | ASSERT (_, p', _) 
     | ASSIGN (_, _, p', _)
     | PROCCALL (_, _, _, _, p', _)
-    | CONS (_, _, p', _)
     | MALLOC (_, _, p', _)
-    | SARRAY (_, _, _, p', _)
     | MUTATION (_, _, _, p', _)
     | LOOKUP (_, _, _, p', _)
     | DISPOSE (_, p', _)
-    | MAPS (_, _, p', _)
     | DECL (_, _, _, p', _)
     | RETURN (_, p', _)
-    | LABEL (_, _,  p', _)
-    | BREAK (p', _)
-    | CONTINUE (p', _)
     -> traverse f f1 (f acc p) p'
   | IF (_, p1, p2, p', _)
-    | PARALLEL (p1, p2, p', _)
     -> let acc' = f acc p in
        let acc1 = traverse f f1 (f1 acc acc') p1 in
        let acc2 = traverse f f1 (f1 acc acc1) p2 in
@@ -1149,6 +1145,15 @@ let rec traverse f f1 acc p =
      let acc1 = traverse f f1 (f1 acc acc') p1 in
      let acc2 = traverse f f1 (f1 acc acc1) p' in
      acc2
+
+let has_assert p =
+  traverse
+    (fun acc -> function | ASSERT _ -> true
+                                | _ -> acc)
+    (fun a b -> a || b)
+    false
+  p
+           
      
 let get_attribute p =
   let f _ = function
@@ -1164,3 +1169,129 @@ let get_attribute p =
   in
   let f1 a b = b in
   traverse f f1 [] p
+
+let rec next p =
+  match p with 
+    SKIP -> raise Not_found
+  | ASSERT (_, p', _)
+  | ASSIGN (_, _, p', _)
+  | PROCCALL (_, _, _, _, p', _)
+  | MALLOC (_, _, p', _)
+  | MUTATION (_, _, _, p', _)
+  | LOOKUP (_, _, _, p', _)
+  | DISPOSE (_, p', _)
+  | DECL (_, _, _, p', _)
+  | RETURN (_, p', _)
+  | IF (_, _, _, p', _) 
+  | WHILE (_, _, _, _, p', _)
+  | BLOCK (_, p', _) -> p'
+
+let rec filter f p =
+  if p = SKIP then SKIP else
+  let n, s = f p in
+  let p'' = filter f n in
+  if not s then
+    p''
+  else
+    match p with 
+      SKIP -> SKIP
+    | ASSERT (a, _, l) -> ASSERT (a, p'', l)
+    | ASSIGN (a, b, _, l) -> ASSIGN (a, b, p'', l)
+    | PROCCALL (a, b, c, d, _, l) -> PROCCALL (a, b, c, d, p'', l)
+    | MALLOC (a, b, _, l) -> MALLOC (a, b, p'', l) 
+    | MUTATION (a, b, c, _, l) -> MUTATION (a, b, c, p'', l) 
+    | LOOKUP (a, b, c, _, l) -> LOOKUP (a, b, c, p'', l)
+    | DISPOSE (a, _, l) -> DISPOSE (a, p'', l) 
+    | DECL (a, b, c, _, l) -> DECL (a, b, c, p'', l)
+    | RETURN (a, _, l) -> RETURN (a, p'', l)
+    | IF (a, p1, p2, _, l) -> IF (a, filter f p1, filter f p2, p'', l)
+    | WHILE (a, b, p1, c, _, l) ->
+       let p1' = filter f p1 in
+       WHILE (a, b, p1', c, p'', l)
+    | BLOCK (p1, _, l) ->
+       let p1' = filter f p1 in
+       BLOCK (p1', p'', l)
+
+let rem_decl p =
+  filter (function DECL _ as p -> next p, false | p -> next p, true) p
+
+let rem_lib_fun p =
+  let p' =
+  filter (function
+        (DECL (x1, len, _,
+              LOOKUP (x2, _, "*",
+                      PROCCALL (_, proc, params, _, n, _), _), _)) as p
+           when x1=x2 ->
+        
+         let p_name = E.var_decode @@ T.toExp proc in
+         if p_name = "fprintf" && x1 = T.toExp @@ List.nth params 1 then
+           begin  (n, false) end
+         else if p_name = "perror" && x1 = T.toExp @@ List.nth params 0 then
+           begin  (n, false) end
+         else if p_name = "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEC1EPKcRKS3_" && x1 = T.toExp @@ List.nth params 1 then
+           begin  (n, false) end
+         else
+           begin (next p, true) end
+      | p -> next p, true
+    ) p in
+  p'
+
+
+let rec get_fp_args proc_names body =
+  let f = (fun acc ->
+      function
+        PROCCALL (_, a, args, _, _, _) ->
+         let (_, args') = List.fold_left
+                            (fun (i,acc) arg ->
+                              let earg = Term.toExp arg in
+                              let sa = Exp.toStr earg in
+                              if List.exists (fun pn -> pn=sa) proc_names then
+                                (i+1, (a,i,sa)::acc)
+                              else if E.is_func earg then
+                                (i+1, (a,i,sa)::acc)
+                              else
+                                (i+1, acc)
+                            ) (0,[]) args in
+         acc @ args'
+      | _ -> []
+    ) in
+  let f1 a b = a @ b in
+  traverse f f1 [] body
+  
+let rec replace_fp p_map p =
+  let module S = Map.Make(String) in
+  match p with 
+    SKIP -> SKIP
+  | ASSERT (a, p', l) ->
+     ASSERT (a, replace_fp p_map p', l)
+  | ASSIGN (a, b, p', l) ->
+     ASSIGN (a, b, replace_fp p_map p', l)
+  | PROCCALL (z, a, args, b, p', l) ->
+     let sa = (Term.toStr a) in
+     if S.mem sa p_map then
+       let fp_args = S.find sa p_map in
+       (* let _,p = List.fold_left (fun (i,c)  ) (0,c) fp_args in *)
+       let fp_arg = List.hd fp_args in
+       PROCCALL (z, Term.EXP (Exp.VAR (fp_arg,[])), args, b, replace_fp p_map p', l)
+     else
+       PROCCALL (z, a, args, b, replace_fp p_map p', l)
+  | MALLOC (a, b, p', l) ->
+     MALLOC (a, b, replace_fp p_map p', l)
+  | MUTATION (a, b, c, p', l) ->
+     MUTATION (a, b, c, replace_fp p_map p', l)
+  | LOOKUP (a, b, c, p', l) ->
+     LOOKUP (a, b, c, replace_fp p_map p', l)
+  | DISPOSE (a, p', l) ->
+     DISPOSE (a, replace_fp p_map p', l)
+  | DECL (a, b, c, p', l) ->
+     DECL (a, b, c, replace_fp p_map p', l)
+  | RETURN (a, p', l) ->
+     RETURN (a, replace_fp p_map p', l)
+  | IF (b, p1, p2, p', l) ->
+     IF (b, p1, p2, replace_fp p_map p', l)
+  | WHILE (b, c, p1, d, p', l) ->
+     WHILE (b, c, p1, d, replace_fp p_map p', l)
+  | BLOCK (p1, p', l) ->
+    BLOCK (p1, replace_fp p_map p', l)      
+
+                  
