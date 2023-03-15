@@ -34,6 +34,8 @@ let pp_ap = function
   | AProj (v,ind) -> pl [ pv v; ps "."; pi ind ]
   | APtrProj (v,ind) -> pl [ pf "(*%s)." v; pi ind ]
 
+
+                      (*
 let rec pp_ref_ast (r: (RefinementTypes.refine_ap list, RefinementTypes.refine_ap) RefinementTypes.refinement) =
   let open RefinementTypes in
   match r with
@@ -58,7 +60,8 @@ let rec pp_ref_ast (r: (RefinementTypes.refine_ap list, RefinementTypes.refine_a
       (ul pp_ref_ast) r1
       (ul pp_ref_ast) r2
   | _ -> failwith @@ "Cannot annotate with relation " (* ^ (string_of_refinement r) *)
-
+                       *)
+                      
 let rec pp_lhs (l:lhs) =
   match l with
   | `OVar x -> pv x
@@ -67,14 +70,10 @@ let rec pp_lhs (l:lhs) =
                    ps "*";
                    pv v
                    ]
-  | `Nondet None -> ps "_"
-  | `Nondet (Some nref) ->
-    pb [
-        pf "(_@ :@ %a)" (ul pp_ref_ast) nref
-      ]
+  | `Nondet -> ps "_"
   | `BinOp (l1, op, l2) ->
      pl [
-         pf "%a %s %a" (ul pp_lhs) l1 op (ul pp_lhs) l2
+         pf "(%a %s %a)" (ul pp_lhs) l1 op (ul pp_lhs) l2
        ]
   | `Null -> ps "null"
   | `OBool b -> if b then ps "True" else ps "False"
@@ -120,8 +119,8 @@ let rec pp_patt = function
                     ps ")"
                   ]   
 
+                  (*
 let rec pp_typ t =
-  let open RefinementTypes in
   let t_printer = match t with
     | Int r -> pf "%a int" (ul pp_ref_ast) r
     | Ref (t,o,_) -> pf "%a ref %f" (ul pp_typ) t o
@@ -152,14 +151,15 @@ let rec pp_typ t =
   pb [
     t_printer
   ]
-
-
+                   *)
+(*
 let pp_ty_env gamma =
   psep_gen semi @@
     List.map (fun (k, t) ->
       pf "%s: %a" k (ul pp_typ) t
     ) gamma
-
+ *)
+                  
 let do_need_block all_seq = function
     | Seq _ -> true
       | Alias _ when all_seq -> true
@@ -226,12 +226,7 @@ let rec pp_expr ~ip:((po_id,pr_id) as ip) ~annot e =
                        ]
     | Unit _ -> ps "()"
     | EAnnot(_,ty_env) ->
-      pl [
-          indent_from_here;
-          pf "$gamma {"; newline;
-          pp_ty_env ty_env;
-          dedent; newline; ps "}"; 
-        ]
+      ps ""
   in
   match e with
   | Seq _ -> e_printer
@@ -309,3 +304,4 @@ let pretty_print_program ?(with_labels=true) ?(annot_fn=(fun _ _ -> ())) ?(annot
   let ff = Format.formatter_of_out_channel out_chan in
   pprint_prog ~ip:(id_printer with_labels) ~annot_fn ~annot ff prog;
   Format.pp_print_newline ff ()
+
