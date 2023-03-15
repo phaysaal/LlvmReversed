@@ -9,7 +9,7 @@ type lhs = [
   | `OVar of string
   | `OInt of int
   | `ODeref of string
-  | `Nondet (* of RefinementTypes.symbolic_refinement option *)
+  | `Nondet
   | `BinOp of lhs * string * lhs
   | `Null
   | `OBool of bool
@@ -43,13 +43,12 @@ type exp =
   | Alias of pos * string * A.src_ap
   | Assert of pos * relation
   | Seq of Lexing.position * exp * exp
-  | EAnnot of pos * (string (* * RefinementTypes.src_typ *)) list
+  | EAnnot of pos * (string) list
 
 type fn = string * string list * exp
 type prog = fn list * exp
 
 module SS = Set.Make(String)
-(* module SM = StringMap *)
 
 let tvar = Printf.sprintf "__t%d"
 
@@ -67,7 +66,6 @@ let tag_fresh pos t =
 let tag_with i t =
   (i, t)  
 
-(*  
 let rec simplify_expr ?next count e : pos * A.raw_exp =
   let get_continuation ~ctxt count = match next with
     | None -> simplify_expr count @@ Value (LabelManager.register_with ctxt, `OInt 0)
@@ -85,7 +83,7 @@ let rec simplify_expr ?next count e : pos * A.raw_exp =
   | Cond (i,`Var v,e1,e2) ->
     A.Cond (v,simplify_expr count e1,simplify_expr count e2) |> tag_with i
   | Cond (i,`Nondet,e1,e2) ->
-    bind_in ~ctxt:i count (`Nondet None) (fun c tvar ->
+    bind_in ~ctxt:i count (`Nondet) (fun c tvar ->
         A.Cond (tvar,simplify_expr c e1,simplify_expr c e2)
         |> tag_with i
       )
@@ -138,7 +136,7 @@ and lift_to_lhs ~ctxt count (lhs : lhs) (rest: int -> A.lhs -> A.exp) =
   | `OVar v -> k @@ A.Var v
   | `OInt i -> k @@ A.Const i
   | `ODeref v -> k @@ A.Deref v
-  | `Nondet r -> k @@ A.Nondet r
+  | `Nondet -> k @@ A.Nondet
   | `LengthOf lhs ->
     lift_to_var ~ctxt count lhs (fun c' r ->
         rest c' @@ A.LengthOf r
@@ -173,7 +171,7 @@ and lift_to_lhs ~ctxt count (lhs : lhs) (rest: int -> A.lhs -> A.exp) =
 and lift_to_rinit ~ctxt count (r: lhs) rest =
   let k = rest count in
   match r with
-  | `Nondet None -> k A.RNone
+  | `Nondet -> k A.RNone
   | `OVar v -> k @@ A.RVar v
   | `OInt i -> k @@ A.RInt i
   | #lhs as l ->
@@ -229,4 +227,3 @@ let simplify (fns,body) =
     ) fns in
   let program_body = simplify_expr 0 body in
   (simpl_fn, program_body)
- *)

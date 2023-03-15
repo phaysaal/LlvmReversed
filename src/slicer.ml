@@ -65,7 +65,7 @@ let rec fv_lhs = function
     | `MkArray l -> fv_lhs l
   | `Call (_, _, xs) | `Tuple (xs) ->
      List.fold_left (fun acc a -> S.union acc @@ fv_lhs a) S.empty xs
-  | `Nondet
+  | `Nondet _
     | `OBool _
     | `OInt _
     | `Null
@@ -208,7 +208,7 @@ let rec get_calles_from_lhs stack fns l : T.t =
             T.empty
        end
   | `Tuple (_)
-  | `Nondet
+  | `Nondet _
     | `OBool _
     | `OInt _
     | `Null ->
@@ -288,7 +288,7 @@ let rec calls_lhs fns l =
          (* (false, S.empty, l) *)
      end
   | `Tuple (_)
-  | `Nondet
+  | `Nondet _
     | `OBool _
     | `OInt _
     | `Null

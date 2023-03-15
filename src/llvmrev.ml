@@ -18,15 +18,12 @@ let compacted_dir = ref "";;
 let transformed_dir = ref "";;
 let trans_dir = ref "";;
 let filesn = ref 0;;
-let bc_mode = ref false;;
-let bc_file = ref "";;
 
 let checkdir s =
   let _ = Sys.command ("mkdir " ^ s) in
   ()
 ;;
 
-(*
 let manage_dirs () =
   let endslash s = String.sub s (String.length s - 1) 1 = "/" in
   let ifslash s = if endslash s then String.sub s 0 (String.length s - 1) ^ "_LlvmRev/" else s ^ "_LlvmRev/" in
@@ -54,112 +51,8 @@ let manage_dirs () =
   checkdir !compacted_dir;
   checkdir !transformed_dir;
   ()
-;; *)
-
-let manage_dirs () =
-  let endslash s = String.sub s (String.length s - 1) 1 = "/" in
-  let ifslash s = if endslash s then String.sub s 0 (String.length s - 1) ^ "_LlvmRev/" else s ^ "_LlvmRev/" in
-
-  let fdir = ref "" in
-  let parent_dir_name s =
-    let ss = String.split_on_char (String.get Filename.dir_sep 0) s in
-    let ss' = ss |> List.rev in
-    match ss' with
-      fname::dirs ->
-      let ss' = dirs |> List.rev |> String.concat Filename.dir_sep in
-      fdir := String.sub fname 0 (String.length fname - 3);
-      bc_file := fname;
-      ss'
-    | _ -> raise (Err "Invalid filename")
-  in
-  
-  
-  let s = if !bc_mode then parent_dir_name !bc_file else Sys.argv.(1) in
-  
-  root_dir := s;
-  let lr_dir =  if !bc_mode then ifslash @@ !root_dir ^ Filename.dir_sep ^ Filename.remove_extension !bc_file else ifslash !root_dir in
-  let slac_dir = lr_dir ^ "SlacData/" in
-  
-  if Sys.file_exists lr_dir then
-    begin
-      let _ = Sys.command ("rm -r " ^ lr_dir) in
-      ()
-    end;
-
-  comp_dir := slac_dir ^ "LLVM/";
-  trans_dir := slac_dir ^ "Translated/";
-  T.func_dir := !trans_dir ^ "func/";
-  compacted_dir := !trans_dir ^ "Compacted/";
-  transformed_dir := !trans_dir ^ "FPTransformed/";
-
-  checkdir lr_dir;
-  checkdir slac_dir;
-  checkdir !comp_dir;
-  checkdir !trans_dir;
-  checkdir !T.func_dir;
-  checkdir !compacted_dir;
-  checkdir !transformed_dir;
-
-  if !bc_mode then
-    begin
-      let str = "cp " ^ !root_dir ^ Filename.dir_sep ^ !bc_file ^ " " ^ !comp_dir ^ Filename.dir_sep ^ !bc_file in
-      F.pn str;
-      let _ = Sys.command ( str ) in
-      ()
-    end;
- 
-  ()
 ;;
 
-let parse_args () =
-  let l = Array.length Sys.argv in
-  let rec aux i =
-    if i < l then
-      let d = Array.get Sys.argv i in
-      match d with
-      (* | "-np" ->
-         T.non_pattern := true;
-         aux (i+1) *)
-      | "-t" ->
-         V.Options.show_types := true;
-         aux (i+1)
-      (* | "-nf" ->
-         SlacToConsort.show_not_found_function := true;
-         aux (i+1) *)
-      | "-skipnf" ->
-         SlacToConsort.skip_not_found_function := true;
-         aux (i+1)
-      | "-exc" ->
-         Trans.exception_mode := true;
-         aux (i+1)
-      | "-llvmslice" ->
-         Trans.llvm_slice := true;
-         aux (i+1)
-      | _ -> 
-         if i < l-1 then  
-           match d with
-             "-d" ->
-              let sdeb = Array.get Sys.argv (i+1) in
-              let debs = String.split_on_char ',' sdeb in
-              F.p_opt := debs;
-              aux (i+2)
-           | "-bc" ->
-              bc_file := Array.get Sys.argv (i+1);
-              bc_mode := true; 
-              aux (i+2)
-           | "-f" ->
-              T.one_func := Array.get Sys.argv (i+1);
-              aux (i+2)
-           | _ ->
-              aux (i+1)
-         else
-           ()
-    else
-      ()
-  in
-  aux 1
-;;
-(*
 let compile_a_cpp_file (path, file) =
   let extra =
     let rec aux i =
@@ -170,17 +63,6 @@ let compile_a_cpp_file (path, file) =
     in
     aux 2 in 
   let str_cmd = "clang -fno-discard-value-names -emit-llvm " ^ extra ^ " -o " ^ !comp_dir ^ file ^ ".bc -c " ^ path in
-  T.pf "%s\n" str_cmd;
-  let r = Sys.command str_cmd in
-  if r = 0 then
-    file ^ ".bc"
-  else
-    raise (Err "clang command not successfull")
-;;
- *)
-
-let compile_a_cpp_file (path, file) =
-  let str_cmd = "clang -fno-discard-value-names -O0 -emit-llvm -o " ^ !comp_dir ^ file ^ ".bc -c " ^ path in
   T.pf "%s\n" str_cmd;
   let r = Sys.command str_cmd in
   if r = 0 then
@@ -217,19 +99,8 @@ let get_all_C_files curdir =
   aux (curdir, curdir)
 ;;
 
-(* let compile () =
-  get_all_C_files !root_dir 
-;; *)
 let compile () =
-  if !bc_mode then
-    begin
-      (* F.pn !bc_file; *)
-      [!bc_file]
-    end
-  else
-    begin
-      get_all_C_files !root_dir
-    end
+  get_all_C_files !root_dir 
 ;;
 
 let write_file i filename fullpath globals structures =
@@ -281,18 +152,17 @@ let configure () =
 
 let _ =
   try
-    parse_args ();
     manage_dirs ();
     configure ();
     let llvm_files = compile () in
-    
+    T.pf "Compilation to LLVM is finished\n";
     let gs = translate llvm_files in
     T.pf "Translation to SLAC C is finished\n";
 
     let consort = try CONF.find "CONSORT" !conf with Not_found -> "" in
     let consortoutdir = try CONF.find "CONSORTOUTDIR" !conf with Not_found -> "" in
     List.iter (fun (f, g) ->
-                SlacToConsort.translate_to_consort consort (consortoutdir ^ f) g) gs
+                SlacToConsort.print_consort consort (consortoutdir ^ f) g) gs
   with
     e ->
     T.pf "Exception\n"; raise e

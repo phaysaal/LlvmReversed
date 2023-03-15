@@ -458,7 +458,7 @@ end;;
 module Exp = struct
 
   (** Variables with its type/attributes *)
-  type attr = PTR | STRUCT of string | EXQ | ARRAY of t list | PARAM | PTRPTR | GLOBAL | HAT | BAR | EXTERN | FUNCPTR of attr list * attr list | TILDE | CHECK | DOT | NESTED | QUESTION | DOTDOT | ACUTE | INDIRECT | STATIC | SIMPLE of int | FUNC of attr list * attr list 
+  type attr = PTR | STRUCT of string | EXQ | ARRAY of t list | PARAM | PTRPTR | GLOBAL | HAT | BAR | EXTERN | FUNCPTR of attr list * attr list | TILDE | CHECK | DOT | NESTED | QUESTION | DOTDOT | ACUTE | INDIRECT | STATIC | SIMPLE of int | FUNC of attr list * attr list
 
   and var_t = string * attr list
 
@@ -528,9 +528,7 @@ module Exp = struct
   let is_funcptr = function VAR (_, attrs) -> List.exists (fun x -> match x with FUNCPTR _ -> true | _ -> false) attrs | _ -> false
 
   let is_func = function VAR (_, attrs) -> List.exists (fun x -> match x with FUNC _ -> true | _ -> false) attrs | _ -> false
-
-  let is_vararg_func = function VAR (_, attrs) -> List.exists (fun x -> match x with FUNC (_, [ARRAY []]) -> true | _ -> false) attrs | _ -> false
-
+                                                                                                                      
   let is_question = function VAR (_, attrs) -> List.exists (fun x -> match x with QUESTION -> true | _ -> false) attrs | _ -> false
 
   let is_nested = function VAR (_, attrs) -> List.exists (fun x -> match x with NESTED -> true | _ -> false) attrs | _ -> false
@@ -562,6 +560,20 @@ module Exp = struct
   let set_indirect = function VAR (v, attr) -> VAR (v, INDIRECT::attr) | _ -> raise (NotAVariable "set_bar")
 
   let set_static = function VAR (v, attr) -> VAR (v, STATIC::attr) | _ -> raise (NotAVariable "set_bar")
+
+  let rec get_struct_name = function
+      VAR (nm, attrs) ->
+      begin
+        try
+          match List.find (fun x -> match x with STRUCT _ -> true | _ -> false) attrs with
+            STRUCT struct_name -> struct_name
+          | _ -> ""
+        with
+          _ -> raise (StError ("Base-1: " ^ nm))
+      end
+    | BINOP (s, Op.ADD, _) -> get_struct_name s
+    | _ -> ""
+         
 
   let get_funcptr_ret = function
       VAR (_, attrs) ->
@@ -692,10 +704,7 @@ module Exp = struct
     else
       false
 
-  let rec enptr = function
-    | VAR (s, a) -> VAR (s,PTR::a)
-    | BINOP (a, o, b) -> BINOP (enptr a, o, b)
-    | e -> e
+  
       
 	let rec toStr = function
 		  NOTHING -> "<nothing>"
@@ -952,7 +961,7 @@ module Exp = struct
     let rec aux ppf = function
 	      PTR -> Format.pp_print_string ppf "PTR"
       | PTRPTR -> Format.pp_print_string ppf "PTRPTR"
-	    | STRUCT (s) -> Format.fprintf ppf "STRUCT \"%s\"" s
+	    | STRUCT (s) -> Format.fprintf ppf "Var.STRUCT \"%s\"" s
 	    | EXQ -> Format.pp_print_string ppf "EXQ"
       | ARRAY l -> Format.fprintf ppf "@[<2>ARRAY@;(%a)@]" (Ftools.pp_print_list pp') l
       | PARAM -> Format.pp_print_string ppf "PARAM"
@@ -1023,7 +1032,7 @@ module Exp = struct
     let rec aux = function
 	      PTR -> "PTR"
       | PTRPTR -> "PTRPTR"
-	    | STRUCT (s) -> "STRUCT " ^ s ^ ""
+	    | STRUCT (s) -> "Var.STRUCT \"" ^ s ^ "\""
 	    | EXQ -> "EXQ"
       | ARRAY l -> "ARRAY (" ^ string_of_list get_printable_string l ^ ")"
       | PARAM -> "PARAM"
@@ -1044,15 +1053,9 @@ module Exp = struct
       | SIMPLE n -> "SIMPLE (" ^ (string_of_int n) ^ ")"
       | FUNC (rets, params) -> "FUNC ([" ^ String.concat "" (aux |>>| rets) ^ "],[" ^ String.concat "" (aux |>>| params) ^ "])"
     in
-    
-    let str_attrs =
-      try string_of_list aux attrs
-      with e -> pn "Exception in var_print";
-        raise e
-    in
-    
-    p ("(" ^ v ^ "," ^ str_attrs ^ ")")
-;;
+    let str_attrs = string_of_list aux attrs in
+    p ("(\"" ^ v ^ "\"," ^ str_attrs ^ ")")
+
 
   let rec fstr () = function
 		  NOTHING -> Format.sprintf "<nothing>"
@@ -1105,24 +1108,6 @@ module Exp = struct
   and fstr_attrs () xs = Format.sprintf "%a" (fstrL fstr_attr ",") xs
 
   let fstr () e = Format.sprintf "%s" (get_printable_string e)
-
-  let rec get_struct_name = function
-      VAR (nm, attrs) ->
-      begin
-        try
-          
-          match List.find (fun x -> match x with STRUCT _ -> true | _ -> false) attrs with
-            STRUCT struct_name -> struct_name
-          | _ -> ""
-        with
-          Not_found -> pn "Exception in get_struct_name "; pn nm; pn "^^"; pn ""; raise Not_found
-        | e -> pn "Exception in get_struct_name "; pn nm; pn "^^"; pi (List.length attrs);
-               
-               pn (Printexc.to_string e);
-               raise (StError ("Base-1: " ^ nm))
-      end
-    | BINOP (s, Op.ADD, _) -> get_struct_name s
-    | _ -> ""
                 
   let get_func_ret = function
       VAR (_, attrs) as v ->
@@ -1157,8 +1142,8 @@ module Exp = struct
     | "int" -> 4
     | "long" -> 8
     | "int64" -> 8
-    | "float" -> 5
-    | "double" -> 9
+    | "float" -> 4
+    | "double" -> 8
     | "sizet" -> 2
     | x -> raise (StError ("Unknown simple type " ^ x))
 
@@ -2481,11 +2466,8 @@ module Term = struct
   let term__string (tr_exp : Exp.t -> Exp.t) = function
     | NULL -> NULL
     | EXP exp -> EXP (tr_exp exp)
-  (* | x -> x *)
-               
-  let enptr = function
-      NULL -> NULL
-    | EXP e -> EXP (Exp.enptr e)
+   (* | x -> x *)
+
                      (*
 	let rec toTerm packs = function
 	 | Cabs.NOTHING -> NULL
