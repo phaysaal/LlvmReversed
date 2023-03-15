@@ -22,6 +22,7 @@ let ldp = Lexing.dummy_pos ;;
 let dp = (0,ldp) ;; 
 let unit = C.Unit (dp) ;;
 let show_not_found_function = ref false;;
+let skip_not_found_function = ref false;;
 
 let mk_val v = C.Value (dp, v) ;;
 let mk_num n = mk_val (C.(`OInt n)) ;; 
@@ -266,7 +267,9 @@ let term_to_imm_op vs = function
 let read_tuple ptrs vs y' a b f =
   (** let (_, a, _) = b in *)
   let st_name = E.get_struct_name (T.toExp b) in
-  let (_, ls, _) = try List.find (fun (sn,_,_) -> sn=st_name) !structs with _ -> raise (Unexpected ("Not found struct " ^ st_name)) in
+  F.dbgf "scLOOKUP" "st_name: %s, f:%s" st_name f;
+  let (_, ls, _) = try List.find (fun (sn,_,_) -> sn=st_name) !structs with _ -> raise (Unexpected ("[1] Not found struct " ^ st_name)) in
+  F.dbgf "scLOOKUP" "fields: %a" (F.fstrL E.fstr ",") (List.map fst ls);
   let sa = E.var_decode a in
   let frv = fresh_var () in
   let tp = List.map (fun (fld,_) -> if E.var_decode fld = f then Ast.PVar frv else Ast.PVar "_") ls in
@@ -280,9 +283,9 @@ let read_tuple ptrs vs y' a b f =
   in
   let decl, prog =
     if is_fld_struct then
-      S_E.add a S_E.empty, C.Let (dp, Ast.PVar sa, C.(`OVar frv),y')
+      S_E.add a S_E.empty, C.Let (dp, Ast.PVar sa, C.(`ODeref frv),y')
     else
-      S_E.empty, C.Seq (ldp, C.Assign (dp, sa, C.(`OVar frv)),y')
+      S_E.empty, C.Seq (ldp, C.Assign (dp, sa, C.(`ODeref frv)),y')
   in
   
   if List.length tp > 1 then
@@ -291,7 +294,7 @@ let read_tuple ptrs vs y' a b f =
     decl, C.Let (dp, List.hd tp, b', prog)
 ;;
 
-let write_tuple ptrs vs y' a f b =
+(* OLD let write_tuple ptrs vs y' a f b =
 (** let a = ref (0, 0) in
     let (x, y) = *a in
     a := (x, 100);
@@ -299,7 +302,7 @@ let write_tuple ptrs vs y' a f b =
  *)
   let st_name = E.get_struct_name (T.toExp a) in
   let (_, ls, _) = try List.find (fun (sn,_,_) -> sn=st_name) !structs with _ ->
-                     raise (Unexpected ("Not found struct " ^ st_name)) in
+                     raise (Unexpected ("[2] Not found struct " ^ st_name)) in
   if List.length ls > 1 then
     let lhs, rhs = List.map (fun (fld,_) ->
                        if E.var_decode fld = f then
@@ -312,8 +315,31 @@ let write_tuple ptrs vs y' a f b =
     C.Let (dp, Ast.PTuple lhs, a', C.Seq(ldp, C.Assign (dp, E.var_decode @@ T.toExp a, C.(`Tuple rhs)),y'))
   else
     C.Seq(ldp, C.Assign (dp, E.var_decode @@ T.toExp a, term_to_lhs ptrs vs b),y')
+;; *)
+
+let write_tuple ptrs vs y' a f b =
+(** let a = ref (ref 0, ref 0) in
+    let (x, y) = *a in
+    y := 100
+ *)
+  let st_name = E.get_struct_name (T.toExp a) in
+  let (_, ls, _) = try List.find (fun (sn,_,_) -> sn=st_name) !structs with _ ->
+                     raise (Unexpected ("[2] Not found struct " ^ st_name)) in
+  if List.length ls > 1 then
+    let v = fresh_var () in
+    let lhs = List.map (fun (fld,_) ->
+                       if E.var_decode fld <> f then
+                         Ast.(PVar "_")
+                       else
+                         Ast.(PVar v)
+                     ) ls in
+    let a' = term_to_lhs ptrs vs a in
+    C.Let (dp, Ast.PTuple lhs, a', C.Seq(ldp, C.Assign (dp, v, term_to_lhs ptrs vs b),y'))
+  else
+    C.Seq(ldp, C.Assign (dp, E.var_decode @@ T.toExp a, term_to_lhs ptrs vs b),y')
 ;;
-                           
+
+
 let bexp_to_relation vs = function
     B.UNIT (t1, op, t2) ->
     C.{rop1= term_to_imm_op vs t1;cond=string_of_op op; rop2= term_to_imm_op vs t2}
@@ -525,19 +551,22 @@ let rec unshadow a t e =
 ;; *)
 
 let rec mk_empty_tuple st_name =
-  let (_, ls, _) = try List.find (fun (sn,_,_) -> sn=st_name) !structs with _ -> raise (Unexpected ("Not found struct " ^ st_name)) in
+  let (_, ls, _) = try List.find (fun (sn,_,_) -> sn=st_name) !structs with _ -> raise (Unexpected ("[3] Not found struct " ^ st_name)) in
   let ls' = List.map (fun (l,_) ->
-                if E.is_struct l then
-                  mk_empty_tuple (E.get_struct_name l)
+                
+                if E.is_struct l && not (E.is_ptr l)then
+                  C.(`Mkref (mk_empty_tuple (E.get_struct_name l)))
                 else
-                  C.(`OInt 0)
+                  C.(`Mkref C.(`OInt 0))
               ) ls in
   if List.length ls' > 1 then
-    C.(`Mkref (`Tuple ls'))
+    `Tuple ls'
+  else if List.length ls' = 1 then
+    try List.hd ls'
+    with _ ->
+      raise (Unexpected ("0 (a) fields of " ^ st_name))
   else
-    C.(`Mkref (List.hd ls'))
-
-
+    raise (Unexpected ("0 (b) fields of " ^ st_name))
 
 let rec declare_and_initialize declared' ptrs vs y a len init_data =
   if is_declared declared' a then
@@ -570,6 +599,7 @@ let rec declare_and_initialize declared' ptrs vs y a len init_data =
       let y'' =
         match is_struct, is_array with
           false, false ->
+           F.dbgf "scDECL" "Both Struct and Array";
            begin
              match len, init_data with
              | [], S.INIT_E ->
@@ -614,18 +644,37 @@ let rec declare_and_initialize declared' ptrs vs y a len init_data =
                 raise (Supported "declare and initialize (mistake perhaps)")
            end
         | true, false -> (** TODO: Double Check *)
+           F.dbgf "scDECL" "Only Struct";
            begin
              match init_data with
                S.INIT_E ->
-                (* if E.is_ptr a then
-                  y
-                else *)
-                  C.Let (dp,
-                       init_data_to_patt (string_of_evar a) init_data,
-                       mk_empty_tuple (E.get_struct_name a),
+                F.dbgf "scDECL" "InitE";
+                let lhs = init_data_to_patt (string_of_evar a) init_data in
+                F.dbgf "scDECL" "InitE lhs";
+                let st_name = E.get_struct_name a in
+                F.dbgf "scDECL" "InitE Struct:%s" st_name;
+                let rhs = try C.(`Mkref (mk_empty_tuple st_name))
+                          with Unexpected s as e ->
+                                F.dbgf "scDECL" "Exception:%s" s;
+                                raise e
+                             | F.StError s as e ->
+                                F.dbgf "scDECL" "Exception: %s" s;
+                                raise e
+                             | Not_found as e ->
+                                F.dbgf "scDECL" "Not found ";
+                                raise e
+                             | e ->
+                                F.dbgf "scDECL" "Exception: Other kinds";
+                                raise e
+                in
+                F.dbgf "scDECL" "InitE rhs";
+                C.Let (dp,
+                       lhs,
+                       rhs,
                        y
                )
              | S.INIT_S src when E.is_struct @@ T.toExp src ->
+                F.dbgf "scDECL" "InitS";
                 let src_name = E.get_struct_name @@ T.toExp src in
                 let dest_name = E.get_struct_name a in
                 if dest_name <> src_name then 
@@ -649,12 +698,12 @@ let rec declare_and_initialize declared' ptrs vs y a len init_data =
                     y
                )
              | _ ->
-           (* if E.is_ptr a then *)
-             C.Let (dp,
-                    init_data_to_patt (string_of_evar a) init_data,
-                    init_data_to_tuple ptrs init_data,
-                    y
-               )
+                F.dbgf "scDECL" "Others";
+                C.Let (dp,
+                       init_data_to_patt (string_of_evar a) init_data,
+                       init_data_to_tuple ptrs init_data,
+                       y
+                  )
            (* else
              let st_name = E.get_struct_name a in
              let (_, fields,_) = List.find (fun (sn,_,_) -> sn=st_name) !structs in
@@ -666,12 +715,42 @@ let rec declare_and_initialize declared' ptrs vs y a len init_data =
              ) *)
            end
         | false, true -> (** TODO: Multidimentional array support *)
+           F.dbgf "scDECL" "Only Array";
            C.Let (dp,
                   Ast.PVar (string_of_evar a),
                   C.(`MkArray (exp_to_lhs ptrs vs @@ List.hd len)),
                   y
              )
-        | _, _ -> raise (NotSupported "Others")
+        | true, true ->
+           begin
+             let actuallen = List.hd len in
+             let st_name = E.get_struct_name a in
+             match actuallen with
+               E.CONST i_len ->
+                F.dbgf "STAR" "len: %d" i_len ;
+               begin match init_data with
+                 S.INIT_E ->
+                  let rec iterate acc i =
+                    if i>=i_len then
+                      acc
+                    else
+                      let fv = fresh_var () in
+                      let lhs = init_data_to_patt fv init_data in
+                      let rhs = C.(`Mkref (mk_empty_tuple st_name)) in
+                      iterate ((C.(`OVar fv), (lhs, rhs))::acc) (i+1)
+                  in
+                  let st_data = iterate [] 0 in
+                  let refs, ref_data = List.split st_data in
+                  let lhs = init_data_to_patt (string_of_evar a) init_data in
+                  let arr = C.Let (dp, lhs, C.(`Mkref (`Tuple refs)), y) in
+                  let p = List.fold_left (fun p (a,b) -> C.Let (dp, a, b, p)) arr ref_data in
+                  F.dbgf "scDECL" "Struct and Array";
+                  p
+               | _ -> raise (NotSupported "Others [1]")
+               end
+           | _ ->
+              raise (NotSupported "Others [2]")
+           end
       in
 
       y'' (* , declared *)
@@ -748,19 +827,43 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
   match prog with
   | S.SKIP -> (S_E.empty, S_E.empty, [], C.Unit (dp))
   | ASSIGN (a, b, y, l) ->
-     let vs' = enptr a vs in
-     let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs') y in
-     
-     let sa = try string_of_evar a with e -> F.dbgf "SC" "Exception in Assing"; raise e in
-     let lb = term_to_lhs ptrs vs b in
-     let ptrs' = enptr a ptrs in
-     
-     let p = C.Seq (ldp, C.Assign (dp, sa, lb), y') in
-     (ptrs',
-      declared,
-      ry,
-      p
-     )
+     begin
+       let vs' = enptr a vs in
+       let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs') y in
+       F.pn_s "scCUR" "*** Code ***"; 
+       F.pf_s "scCUR" (S.solo_print 0) prog;
+       F.dbgf "scCUR" "ASSIGN Begin";
+       match b with
+         T.EXP (E.BINOP (bh, V.Op.ADD, E.CONST idx)) when E.is_array bh ->
+          F.dbgf "scASS" "Assign: %a, %d" E.fstr bh idx; 
+          let arr_len = E.get_array_length bh |> List.hd |> E.get_int l in
+          let fv = fresh_var () in
+          let rec iterate acc i =
+            if i>= arr_len then
+              acc
+            else
+              let s = if i=idx then Ast.PVar fv else Ast.PVar "_" in
+              iterate (s::acc) (i+1) in
+          let lhs = Ast.PTuple (iterate [] 0 |> List.rev) in
+          let p   = C.Let (dp, lhs, C.(`ODeref (E.toStr bh)), C.Seq (ldp, C.Assign (dp, E.var_decode a, C.(`ODeref fv)), y')) in
+          F.dbgf "scCUR" "ASSIGN End";
+          (ptrs,
+           declared,
+           ry,
+           p
+          )
+       | _ ->
+          let sa = try string_of_evar a with e -> F.dbgf "SC" "Exception in Assing"; raise e in
+          let lb = term_to_lhs ptrs vs b in
+          let ptrs' = enptr a ptrs in
+          let p = C.Seq (ldp, C.Assign (dp, sa, lb), y') in
+          F.dbgf "scCur" "ASSIGN End";
+          (ptrs',
+           declared,
+           ry,
+           p
+          )
+     end
   | ASSERT (a, y, l) ->
      let ptrs, declared, ry, y' = body_to_cexp gvars y in
      
@@ -778,6 +881,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      let p' = S.IF (b1, b, IF (b2, b, c, S.SKIP, l), y, l) in
      body_to_cexp gvars p'
   | IF (a, b, c, y, l) ->
+     F.dbgf "scIF" "IF Begins of %a" B.fstr a;
      let modv_b, _ = S.mod_free_var b in
      let modv_c, _ = S.mod_free_var c in
      let _, freev_y = S.mod_free_var y in
@@ -797,16 +901,22 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
                       (* C.Cond (dp, bexp_to_ifcond ptrs vs a, b', c'), *)
                     y'
                ) in
+     F.dbgf "scIF" "IF is done of %a" B.fstr a;
      (ptrs,
       declared,
       rb @ rc @ ry,
       p)
   | WHILE (a, bs, b, c, y, l) ->
+     F.dbgf "scP" "WHILE Begins of %a" B.fstr a;
      let ptrs, declared, rw, w' = while_to_recf gvars a b y in
+     F.dbgf "scP" "WHILE Begins of %a" B.fstr a;
      (ptrs, declared, rw, w')
   | DECL (a', _, S.INIT_E, PROCCALL (Some a, T.EXP (E.VAR ("__VERIFIER_nondet_int",_)), [], _,
-              y,_), _) when a'=a ->
-     let ptrs, declared, ry, y' = body_to_cexp gvars y in
+                                     y,_), _) when a'=a ->
+     let ptrs, declared, ry, y' = try body_to_cexp gvars y with Stack_overflow as e -> F.pn "*** STACK @ DECL ***"; raise e in
+     F.pn_s "scCUR" "*** Code ***"; 
+     F.pf_s "scCUR" (S.solo_print 0) prog;
+     F.dbgf "scCUR" "DECL Begin";
      (* let y', declared = fix_shadowing declared a y' in *)
      let sa = string_of_evar a in
      let lb = C.(`Nondet (Some RefinementTypes.Top)) in
@@ -814,6 +924,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
                C.Let (dp, Ast.PVar sa, lb, y')
              else
                C.Let (dp, Ast.PVar sa, lb, y') in
+     F.dbgf "scCUR" "DECL End";
      (ptrs,
       declared,
       ry,
@@ -838,6 +949,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      S_E.empty, S_E.empty, [], C.Assert (dp, bexp_to_relation vs (B.UNIT(T.zero, V.Op.NE, T.zero)))
   | PROCCALL (z, a, b, i, y, l) ->
      begin
+       F.dbgf "scP" "%a begins" T.fstr a;
        let args_with_addr' = (List.map T.toExp b)
                     |> S_E.of_list
                     |> S_E.filter (function E.ADDR _ -> true | _ -> false) 
@@ -854,18 +966,40 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
        let gvs = try DM.find (string_of_tvar a) dep_map with _ -> S_E.empty in
        let lgvs = to_list gvs in
        let lhs_gvs = List.map (exp_to_lhs ~arg_mode:true ptrs vs) lgvs in
+       let s_a = F.corr_filename @@ (E.var_decode @@ T.toExp a) in
+       F.dbgf "scP" "*** 5 @ %s" s_a;
        try
          let (_, params, _) =
            try
-             List.find (fun (pn,_,_) -> E.var_decode pn=F.corr_filename @@ (E.var_decode @@ T.toExp a)) !procedures
+             List.find (fun (pn,_,_) -> E.var_decode pn=s_a) !procedures
            with e ->
-                 if !show_not_found_function then
-                   F.pn ("Not found function: " ^ T.toStr a);
-                 raise e
+                 (* List.iter (fun (pn,_,_) -> F.pn @@ E.var_decode pn) !procedures; *)
+                 if !skip_not_found_function then
+                   (E.VAR (s_a,[]), [], S.SKIP)
+                 else
+                   begin
+                     if !show_not_found_function then
+                       F.pn ("Not found function: " ^ T.toStr a);
+                     raise e
+                   end
          in
+         F.dbgf "scPROC" "*** 6 @ %a" T.fstr a;
          let vparams = List.map var_of_assignee params in
-         
-         let par_arg = List.combine b vparams in
+         F.dbgf "scPROC" "*** 6b @ %a" T.fstr a;
+         let par_arg = try List.combine b vparams
+                       with e ->
+                             if E.is_vararg_func (T.toExp a) then
+                               List.fold_left (fun (pas, prm) arg ->
+                                   match prm with
+                                     [] ->
+                                      let fv = S.fresh_var [] in
+                                      (arg,fv)::pas, []
+                                   | x::xs ->
+                                      (arg,x)::pas, xs 
+                                 ) ([], vparams) b |> (fun (a,_) -> List.rev a)
+                             else
+                               begin F.iterS T.pprint "," b; F.pn ""; F.iterS E.pprint "," vparams; F.pn ""; raise e end in
+         F.dbgf "scPROC" "*** 7 @ %a" T.fstr a;
          let args', es = List.fold_left (fun (args, es) (a,p) ->
                              let e = term_to_lhs ptrs vs a in
                              match a with
@@ -912,6 +1046,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
                          else
                            term_to_lhs ~arg_mode:(E.is_ptr p) ptrs vs a *)
                        ) par_arg in *)
+         F.dbgf "scPROC" "*** 9 @ %a" T.fstr a;
          let all_args = (List.rev args') @ lhs_gvs in
          let ptrs', p, declared =
            match z with
@@ -923,17 +1058,21 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
            | Some z' ->
               S_E.add z' ptrs, C.(Seq (ldp, Assign (dp, string_of_evar z', `Call (string_of_tvar a, List.length b, all_args)), y')), declared
          in
+         F.dbgf "scP" "%a ends" T.fstr a;
          (S_E.union ptrs' args_with_addr,
           declared,
           ry,
           es p)
        with
          Not_found ->
+          F.pn "Not Found @ PROCCALL";
           (ptrs,
           declared,
           ry,
           y')
-       | e -> raise e
+       | e ->
+          F.pn "Other Exception";
+          raise e
      end
   | MALLOC (a, size, y, l) ->
      if E.is_array a then
@@ -956,7 +1095,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
        
          begin
          let st_name = E.get_struct_name a in
-         let tp = mk_empty_tuple st_name in
+         let tp = C.(`Mkref (mk_empty_tuple st_name)) in
          let ptrs, declared, ry, y' = body_to_cexp gvars y in
          let ptrs' = S_E.filter (fun x->not (E.var_decode x=E.var_decode a)) ptrs in
          (* let y', declared = fix_shadowing declared a y' in *)
@@ -976,13 +1115,17 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
        end
   | MUTATION (a, b, c, y, l) ->
      let ptrs1, declared, ry, y' = body_to_cexp gvars y in
+     F.dbgf "scMUTATION" "Mutation begins of %a->%s = %a" T.fstr a b T.fstr c;
      let (pt, ind) = de_add a in
      let fvt = T.head "Mutation" a in
      let ptrs = S_E.add fvt ptrs1 in
      let prog =
        if E.is_array pt then
          if E.is_struct pt then
-           raise (Supported "Mutation")
+           begin
+             S.pprint 2 (S.MUTATION (a, b, c, S.SKIP, l));
+             raise (Supported "Mutation")
+           end
          else
            let prog = C.Update (dp,
                                 exp_to_lhs ~arr_mode:true ptrs vs pt,
@@ -993,7 +1136,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
               y')
        else
          if E.is_struct pt then (** pt->fld = exp; --> pt := () *)
-           write_tuple ptrs vs y' a b c
+           write_tuple ptrs vs y' a b c 
            (* C.Update (dp,
                      term_to_lhs ~arr_mode:true ptrs vs a,
                      exp_to_lhs ptrs vs (E.CONST (int_of_string b)),
@@ -1016,6 +1159,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
               prog,
               y')
      in
+     F.dbgf "scMUTATION" "Mutation ends of %a->%s = %a" T.fstr a b T.fstr c;
      (* if b = "*" then *)
        (ptrs,
         declared,
@@ -1028,16 +1172,27 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      let (pt, ind) = de_add b in
      let vs' =  (* if E.is_struct pt then vs else *) enptr a vs in
      let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, vs') y in
+     F.dbgf "scLOOKUP" "Lookup begins of %a = %a->%s" E.fstr a T.fstr b c;
      let decl, prog =
        if E.is_array pt then
          if E.is_struct pt then
-           raise (Supported "Mutation")
+           begin
+             F.pn "Array and Struct Case";
+             S.pprint 2 (S.LOOKUP (a, b, c, S.SKIP, l));
+             raise (Supported "Lookup: Array and Struct Case")
+           end
          else
-           let rhs = C.(`Read (exp_to_lhs ~arr_mode:true ptrs vs pt, exp_to_lhs ptrs vs ind)) in
-           S_E.empty, C.Seq (ldp, C.Assign (dp, string_of_evar a, rhs), y')
+           begin
+             F.pn "Array and no Struct Case";
+             let rhs = C.(`Read (exp_to_lhs ~arr_mode:true ptrs vs pt, exp_to_lhs ptrs vs ind)) in
+             S_E.empty, C.Seq (ldp, C.Assign (dp, string_of_evar a, rhs), y')
+           end
        else
          if E.is_struct pt then
-           read_tuple ptrs vs y' a b c
+           begin
+             F.pn "not Array and Struct Case";
+             read_tuple ptrs vs y' a b c
+           end
          else
            if ind = E.CONST 0 then
              let rhs = C.(`ODeref (string_of_evar pt)) in
@@ -1046,7 +1201,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
              let rhs = C.(`Read (exp_to_lhs S_E.empty S_E.empty pt, exp_to_lhs ptrs vs ind)) in
              S_E.empty, C.Seq (ldp, C.Assign (dp, string_of_evar a, rhs), y')
      in
-     
+     F.dbgf "scLOOKUP" "Lookup ends of %a = %a->%s" E.fstr a T.fstr b c;
      (S_E.add a ptrs,
       S_E.union decl declared,
       ry,
@@ -1069,9 +1224,12 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
                   y'))
      end
   | DECL (a, len, init_data, y, l) ->
-     F.pf_s "SC" (S.pprint 1) (S.DECL (a, len, init_data, S.SKIP, l)); 
      let ptrs, declared, ry, y' = body_to_cexp (dep_map, gvs, S_E.add a vs) y in
+     F.pn_s "scCUR" "*** Code ***"; 
+     F.pf_s "scCUR" (S.solo_print 0) prog;
+     F.dbgf "scCUR" "DECL Begin";
      let y'' (* , declared *) = declare_and_initialize declared ptrs vs y' a len init_data in
+     F.dbgf "scCUR" "Decl ends of %a" E.fstr a;
      (ptrs,
       declared,
       ry,
@@ -1103,7 +1261,7 @@ and while_to_recf (dep_map, gvs, vs) cond body rest =
   let new_fn = "WHILE__" ^ (new_name ())  in
   let new_call = C.(`Call (new_fn, List.length args, args)) in
   let gvars' = (dep_map, gvs, S_E.union (S_E.union vs modv'') onlyfreev) in
-  let ptrs0, _, fns, then_body' = body_to_cexp gvars' body in
+  let ptrs0, _, fns, then_body' = try body_to_cexp gvars' body with Stack_overflow as e -> F.pn "*** STACK @ WHILE BODY ***"; raise e in
   let exp' = (C.Value (dp, new_call)) in
 
   let then_body = join_at_end exp' then_body' in
@@ -1126,15 +1284,20 @@ let string_of_globals = function
   | _ -> raise (NotSupported "string of globals")
 
 let func_to_fn dep_map (nm, params, body) =
-  F.dbgf "SC_FUN" "Begin: %a" E.fstr nm;
+  F.dbgf "scFUN" "*** *** *** \nBegin: %a" E.fstr nm;
   let snm = string_of_evar nm in
-  let gvars' = DM.find snm dep_map in
-  let gvars = S_E.map (E.var_add E.PTR) gvars' in
+  let gvars' = try DM.find snm dep_map with Not_found -> F.dbgf "ERR" "Not found %s" snm; raise Not_found in
+  let gvars = S_E.map (E.var_add E.PTR) gvars' in 
   let vparams = List.map var_of_assignee params in
-  let ptrs, _, fns, exp = body_to_cexp (dep_map, gvars, S_E.union gvars (S_E.of_list vparams)) body in
+  F.pf_s "scFUN" (S.pprint 0) body; 
+  let ptrs, _, fns, exp = try
+      body_to_cexp (dep_map, gvars, S_E.union gvars (S_E.of_list vparams)) body
+    with
+      Stack_overflow as e -> F.pn "***!!!***"; raise e
+    | e -> F.dbgf "ERR" "Exception in body translation"; raise e (* (NotSupported "body") *) in
   let sparams = List.map string_of_evar vparams in
   let l_glo_dep = to_list gvars |> List.map string_of_evar in
-  F.dbgf "SC_FUN" "Done: %a" E.fstr nm;
+  F.dbgf "scFUN" "-- -- -- -- -- \nDone: %a" E.fstr nm;
   fns @ [(snm, sparams@l_glo_dep, exp)]
 ;;
 
@@ -1147,7 +1310,8 @@ let stmt_to_fn ptrs b = function
      let exp (*,_*) = declare_and_initialize S_E.empty ptrs S_E.empty b v len init_data in
      exp
   | _ -> raise (NotSupported "Stmt")
-    
+
+               (*
 let rec slacC_to_prog dep_map acc = function
     [] -> acc
   | G.PROC ((_,_,S.SKIP),_,_,_,_)::xs
@@ -1163,7 +1327,7 @@ let rec slacC_to_prog dep_map acc = function
      close_in fin;
      slacC_to_prog dep_map acc (pd::xs)
   | _::xs -> slacC_to_prog dep_map acc xs
-;;
+;; *)
 
 let slacC_to_prog dep_map acc funs =
   let len = List.length funs in
@@ -1348,13 +1512,13 @@ let rec get_func_global_dep2 progs dep_map glos =
   ()
 
 let slac_to_consort progs =
-  V.Options.show_types := true;
+  
   structs := List.fold_left (fun acc -> (function G.STRUCT (a,_) -> a::acc | _ -> acc)) [] progs;
   let funs = List.filter
                (function
                 | G.PROC ((_,_,S.SKIP),_,_,_,_)
                   | G.PROC ((_,_,S.BLOCK (S.SKIP, S.SKIP, _)),_,_,_,_) ->
-                   false
+                   true
                 | G.PROC ((nm,_,_),_,_,_,_) when is_not_removable (E.var_decode nm)  ->
                    true
                 | G.FFILE (_,nm) when is_not_removable nm  ->
@@ -1402,6 +1566,7 @@ let slac_to_consort progs =
   (fns, body);;
 
 let print_consort consort fname progs =
+  Ftools.pn "Translation to ConSORT is begins";
   let (fns, body) = slac_to_consort progs in
   Ftools.pn "Translation to ConSORT is finished";
   
