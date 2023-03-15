@@ -407,7 +407,7 @@ let rec subs_lhs u t l =
   | C.(`OVar s) -> `OVar (subs_str u t s) 
   | `OInt _ -> l
   | `ODeref s -> `ODeref (subs_str u t s)
-  | `Nondet _ -> l
+  | `Nondet -> l
   | `BinOp (l, o, r) -> `BinOp (subs_lhs u t l, o, subs_lhs u t r)
   | `Null -> l
   | `OBool _ -> l
@@ -477,7 +477,7 @@ let rec subs_exp s t e =
   | Alias (pos, str, a) ->
      let str' = ss str in
      Alias (pos, str', a)
-  | EAnnot (pos, annots) -> raise (NotSupported "yet") 
+  | EAnnot _ -> raise (NotSupported "yet") 
   | Assert (pos, relation) ->
        Assert (pos, subs_rel s t relation)
   | Let (pos, patt, l, e) ->
@@ -809,7 +809,7 @@ let rec body_to_cexp ((dep_map, gvs, (vs:S_E.t)) as gvars) prog =
      let ptrs, declared, ry, y' = body_to_cexp gvars y in
      (* let y', declared = fix_shadowing declared a y' in *)
      let sa = string_of_evar a in
-     let lb = C.(`Nondet (Some RefinementTypes.Top)) in
+     let lb = C.(`Nondet) in
      let p = if is_a_ptr ptrs vs a then
                C.Let (dp, Ast.PVar sa, lb, y')
              else

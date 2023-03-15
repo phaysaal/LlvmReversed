@@ -9,7 +9,7 @@ type lhs = [
   | `OVar of string
   | `OInt of int
   | `ODeref of string
-  | `Nondet of RefinementTypes.symbolic_refinement option
+  | `Nondet (* of RefinementTypes.symbolic_refinement option *)
   | `BinOp of lhs * string * lhs
   | `Null
   | `OBool of bool
@@ -43,13 +43,13 @@ type exp =
   | Alias of pos * string * A.src_ap
   | Assert of pos * relation
   | Seq of Lexing.position * exp * exp
-  | EAnnot of pos * (string * RefinementTypes.src_typ) list
+  | EAnnot of pos * (string (* * RefinementTypes.src_typ *)) list
 
 type fn = string * string list * exp
 type prog = fn list * exp
 
 module SS = Set.Make(String)
-module SM = StringMap
+(* module SM = StringMap *)
 
 let tvar = Printf.sprintf "__t%d"
 
@@ -67,6 +67,7 @@ let tag_fresh pos t =
 let tag_with i t =
   (i, t)  
 
+(*  
 let rec simplify_expr ?next count e : pos * A.raw_exp =
   let get_continuation ~ctxt count = match next with
     | None -> simplify_expr count @@ Value (LabelManager.register_with ctxt, `OInt 0)
@@ -228,3 +229,4 @@ let simplify (fns,body) =
     ) fns in
   let program_body = simplify_expr 0 body in
   (simpl_fn, program_body)
+ *)
