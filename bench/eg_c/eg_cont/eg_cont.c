@@ -1,15 +1,18 @@
+#include<assert.h>
 int f(int n, int m){
 	int i = 0;
 	while(i<n){
-		if(i == m){
-			i+=2;
+		if(i >= m){
+			i+=5;
 			continue;
 		}
 		i++;	
 	}
+	assert(i>n || m>=n);
+	return i;
 }
 
-int g(int n, int m){
+void g(int n, int m){
 	int i = 0;
 	while(i<n){
 		if(i == m){
@@ -22,7 +25,7 @@ int g(int n, int m){
 	}
 }
 
-int h(int n, int m){
+void h(int n, int m){
 	int i = 0;
 	while(i<n){
 		if(i == m){
@@ -34,4 +37,9 @@ int h(int n, int m){
 		}
 		i++;	
 	}
+}
+
+int main(){
+	return f(20,6);
+	//return f(20,20);
 }

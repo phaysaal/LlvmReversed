@@ -1,5 +1,4 @@
 #include<assert.h>
-
 int f1(int *z){
 	*z = *z+1;
 	return *z;
