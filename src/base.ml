@@ -4,71 +4,37 @@ open Ftools
 (** This module is for handling commandline arguments to handle analysis behavior and output *)
 module Options = struct
   let to_be_verified = ref true
-
   let to_be_error_printed = ref false
-
   let z = ref 0
-
   let to_be_code_printed = ref false
-
   let to_be_report_printed = ref false
-
   let filename = ref ""
-
-  (* let filters: string list ref = ref [] *)
-
   let unknowns: string list ref = ref []
-
   let manuals : string ref = ref ""
-
   let functions: string ref = ref ""
-
   let param: (string * int) option ref = ref None
-
   let is_old = ref true
-
   let in_place_check = ref false
-
   let to_be_entl_printed = ref false
-
   let old_sat = ref false
-
   let entailment = ref false
-
   let show_types = ref false
-
   let hard_mode = ref false
-
   let trace_function = ref ""
-
   let timeout = ref 0.0
-
   let count = ref 0
-
   let is_bsf = ref false
-
   let is_no_evals = ref false
-
   let debfun = ref ""
-
   let dump_to = ref ""
-
   let read_from = ref ""
-
   let pre_to = ref ""
-
   let pre_from = ref ""
-
   let interactive = ref false
-
   let interactive_ref = ref false
-                  
   let recompute_specs = ref false
-
   let catch_exception = ref false
-
   let pause = ref false
-
   let fp_json_file = ref ""
 end;;
 
@@ -76,23 +42,14 @@ end;;
 module Shared = struct
 
   let get_translated_dir slacDataDir =  slacDataDir ^ "/Translated";;
-
   let get_fpa_dir slacDataDir =  slacDataDir ^ "/Fpa";;
-
   let get_fpa_fundef_dir fpaDir =  fpaDir ^ "/Fundef";;
-
   let get_fpa_global_data_dir fpaDir =  fpaDir ^ "/GlobalData";;
-
   let get_fpa_profile_dir fpaDir = fpaDir ^ "/Profiles";;
-             
   let init_dir tempdir = tempdir ^ "/fold";;
-  
   let struct_file tempdir = tempdir ^ "/fold/structs.slac";;
-
   let az_file tempdir = tempdir ^ "/fold/az.slac";;
-
   let r_file tempdir = tempdir ^ "/fold/r.slac";;
-
   let ret_file tempdir = tempdir ^ "/fold/ret.slc";;
 
   let rec sub_str a b =
@@ -155,175 +112,6 @@ module Shared = struct
                  ];;
 end;;
 
-(* module VCabs = struct
-  module C = Cabs
-           
-  let cexp_to_int = function
-      C.CONSTANT (C.CONST_INT s) ->
-      int_of_string s
-    | _ -> raise (StError "Illegal Integer (Cexp to int)")
-
-  let pp_uop ppf = function
-      C.NOT -> Format.pp_print_string ppf "NOT"
-    | C.MINUS -> Format.pp_print_string ppf "MINUS"
-    | C.PLUS -> Format.pp_print_string ppf "PLUS"
-    | C.BNOT -> Format.pp_print_string ppf "BNOT"
-    | C.MEMOF -> Format.pp_print_string ppf "MEMOF"
-    | C.ADDROF -> Format.pp_print_string ppf "ADDROF"
-    | _ -> Format.pp_print_string ppf "OTHER"
-
-  let print_uop = function
-      C.NOT -> "NOT"
-    | C.MINUS -> "MINUS"
-    | C.PLUS -> "PLUS"
-    | C.BNOT -> "BNOT"
-    | C.MEMOF -> "MEMOF"
-    | C.ADDROF -> "ADDROF"
-    | _ -> "OTHER"
-         
-  let rec pp_c ppf = function
-      C.NOTHING -> Format.pp_print_string ppf "NOTHING"
-    | C.UNARY (unary_operator, expression) ->
-        Format.fprintf ppf "UNARY@ @[<1>(%s,@,%a)@]" (print_uop unary_operator) pp_c expression
-    | C.LABELADDR (str) -> Format.fprintf ppf "LABELADDR@ @[<1>(%s)@]" str (* GCC's && Label *)
-    | C.BINARY (binary_operator, expression1, expression2) ->
-        Format.fprintf ppf "BINARY@ @[<1>(%a,@,%a)@]" pp_c expression1 pp_c expression2
-    | C.QUESTION (expression1, expression2, expression3) ->
-        Format.pp_print_string ppf ""
-   (* A CAST can actually be a constructor expression *)
-    | C.CAST ((specifier, decl_type), init_expression) ->
-        Format.pp_print_string ppf "CAST ..."
-    (* There is a special form of CALL in which the function called is
-       __builtin_va_arg and the second argument is sizeof(T). This 
-       should be printed as just T *)
-    | C.CALL (expression, expression_list) ->
-        Format.pp_print_string ppf "CALL ..."
-    | C.COMMA (expression_list) ->
-        Format.pp_print_string ppf "COMMA ..."
-    | C.CONSTANT (constant) ->
-        Format.pp_print_string ppf "CONSTANT"
-    | C.PAREN expression ->
-        Format.fprintf ppf "PAREN@ @[<1>(%a)@]" pp_c expression
-    | C.VARIABLE str ->
-        Format.fprintf ppf "VARIABLE@ %s" str
-    | C.EXPR_SIZEOF expression ->
-        Format.fprintf ppf "EXPR_SIZEOF@ @[<1>(%a)@]" pp_c expression
-    | C.TYPE_SIZEOF (specifier, decl_type) ->
-        Format.fprintf ppf "TYPE_SIZEOF ..."
-    | C.EXPR_ALIGNOF expression ->
-        Format.fprintf ppf "EXPR_ALIGNOF ..."
-    | C.TYPE_ALIGNOF (specifier, decl_type) ->
-        Format.fprintf ppf "TYPE_ALIGNOF ..."
-    | C.INDEX (expression1, expression2) ->
-        Format.fprintf ppf "INDEX@;@[<1>(%a,@,%a)@]" pp_c expression1 pp_c expression2
-    | C.MEMBEROF (expression, str) ->
-        Format.fprintf ppf "MEMBEROF@ "
-    | C.MEMBEROFPTR (expression, str) ->
-        Format.fprintf ppf "MEMBEROFPTR@ @[<1>(%a,@,%s)@]" pp_c expression str
-    | C.GNU_BODY block ->
-        Format.fprintf ppf "GNU_BODY ..."
-    | C.EXPR_PATTERN str -> Format.fprintf ppf "EXPR_PATTERN"     (* pattern variable, and name *)
-
-  (* let c_print = Format.asprintf "%a" pp_c *)
-  let rec c_print = function
-      C.NOTHING -> "NOTHING"
-    | C.UNARY (unary_operator, expression) -> "UNARY (" ^ print_uop unary_operator ^ "," ^ c_print expression ^ ")"
-    | C.LABELADDR (str) -> "LABELADDR (" ^ str ^ ")"  (* GCC's && Label *)
-    | C.BINARY (binary_operator, expression1, expression2) ->
-       "BINARY (" ^ c_print expression1 ^ "," ^ c_print expression2 ^ ")"
-    | C.QUESTION (expression1, expression2, expression3) ->
-       ""
-   (* A CAST can actually be a constructor expression *)
-    | C.CAST ((specifier, decl_type), init_expression) ->
-       "CAST ..."
-    (* There is a special form of CALL in which the function called is
-       __builtin_va_arg and the second argument is sizeof(T). This 
-       should be printed as just T *)
-    | C.CALL (expression, expression_list) ->
-       "CALL ..."
-    | C.COMMA (expression_list) ->
-       "COMMA ..."
-    | C.CONSTANT (constant) ->
-       "CONSTANT"
-    | C.PAREN expression ->
-       "PAREN (" ^ c_print expression ^ ")"
-    | C.VARIABLE str ->
-       "VARIABLE " ^ str
-    | C.EXPR_SIZEOF expression ->
-       "EXPR_SIZEOF (" ^ (c_print expression) ^ ")"
-    | C.TYPE_SIZEOF (specifier, decl_type) ->
-       "TYPE_SIZEOF ..."
-    | C.EXPR_ALIGNOF expression ->
-       "EXPR_ALIGNOF ..."
-    | C.TYPE_ALIGNOF (specifier, decl_type) ->
-       "TYPE_ALIGNOF ..."
-    | C.INDEX (expression1, expression2) ->
-       "INDEX (" ^ c_print expression1^ ", " ^ c_print expression2 ^ ")"
-    | C.MEMBEROF (expression, str) ->
-       "MEMBEROF "
-    | C.MEMBEROFPTR (expression, str) ->
-       "MEMBEROFPTR (" ^ c_print expression ^ ", " ^ str ^ ")"
-    | C.GNU_BODY block ->
-       "GNU_BODY ..."
-    | C.EXPR_PATTERN str -> "EXPR_PATTERN"     (* pattern variable, and name *)
-
-  let decl_fv specifier =
-    let rec exp_decl_fv = function
-        C.NOTHING -> []
-      | C.UNARY (_, e) -> exp_decl_fv e
-      | C.BINARY (_, e1, e2) -> 
-         exp_decl_fv e1 @ exp_decl_fv e2
-      | C.EXPR_SIZEOF (C.PAREN (C.VARIABLE s)) -> [s]
-      | C.EXPR_SIZEOF (C.PAREN (C.INDEX (C.VARIABLE s, _))) -> [s]
-      | C.EXPR_SIZEOF (C.PAREN (C.INDEX (C.PAREN (C.VARIABLE s), _))) -> [s]
-      | C.EXPR_SIZEOF (C.VARIABLE s) -> [s]
-      | C.EXPR_SIZEOF (C.INDEX (C.VARIABLE s, _)) -> [s]
-      | C.EXPR_SIZEOF (C.INDEX (C.PAREN (C.VARIABLE s), _)) -> [s]
-      | C.PAREN (e) -> exp_decl_fv e
-      | _ -> []
-    in
-    
-    let rec dt_decl_fv = function
-        C.ARRAY (_, _, exp) ->
-         exp_decl_fv exp
-      | C.PARENTYPE (_, dt, _) -> dt_decl_fv dt
-      | C.PTR (_, dt) -> dt_decl_fv dt
-      | C.PROTO (dt, _, _) -> dt_decl_fv dt
-      | C.JUSTBASE -> []
-    in
-    let name_decl_fv ((_, dt, _, _), _) : string list = dt_decl_fv dt in
-    let field_decl_fv (_, names) : string list =
-      List.concat (name_decl_fv |>>| names)
-    in
-    let spec_decl_fv = function
-        C.SpecType (C.Tstruct (_, Some l_fields, _)) ->
-         let r : string list = List.concat (field_decl_fv |>>| l_fields) in
-         r
-      | _ -> []
-    in
-    List.concat (spec_decl_fv |>>| specifier)
-
-  let rec is_struct except = function
-      [] -> false
-    | C.SpecType s::others ->
-       begin
-         match s with
-           C.Tstruct _ -> true
-         | C.Tnamed str -> not (str |<- except)
-         | _ -> is_struct except others
-       end
-    | _::others -> is_struct except others
-
-  let rec is_cabs_ptr = function
-      C.JUSTBASE -> false
-    | C.PTR _ -> true
-    | C.PARENTYPE (_, dt, _) -> is_cabs_ptr dt
-    | C.ARRAY (dt, _, _) -> is_cabs_ptr dt
-    | C.PROTO (dt, _, _) -> is_cabs_ptr dt
-      
-end;;
- *)
-
 (** Line numbers are handled *)
 module Locs = struct
   type t = string * int
@@ -333,17 +121,12 @@ module Locs = struct
   let pp ppf (fn, ln) =
     Format.fprintf ppf "@[<1>(\"%s\",@,%d)@]" fn ln
 
-  (* let print = Format.asprintf "%a" pp *)
   let print (fn, ln) =
     "(\"" ^ fn ^ "\"," ^ (string_of_int ln) ^ ")" 
 
   let to_str (loc : t) = "line " ^ (string_of_int (snd loc)) ^ " in " ^ (fst loc)
 
   let fstr () (fn, ln) = Format.sprintf "line %s in %d\n" fn ln 
-                       
-	(* let to_loc (loc : Cabs.cabsloc) =
-		(loc.Cabs.filename, loc.Cabs.lineno)
-   *)
                        
  	let to_line (_, l) = (string_of_int l)
 end;;
@@ -352,40 +135,7 @@ end;;
 module Op = struct
 		type t = ADD | SUB | MUL | DIV | MOD | EQ | NE | LE | OR | AND | DUMMY | SHL | SHR | BOR | BAND | MAPSTO | MIN | MAX | XOR
       [@@deriving show {with_path = false}]
-
-      (*
-		let toOp = function
-			| Cabs.ADD -> ADD
-			| Cabs.SUB -> SUB
-			| Cabs.MUL -> MUL
-			| Cabs.DIV -> DIV
-			| Cabs.MOD -> MOD
-			| Cabs.EQ -> EQ
-			| Cabs.NE -> NE
-			| Cabs.LT -> LE
-			| Cabs.OR -> OR
-			| Cabs.AND -> AND
-			| Cabs.SHL -> SHL
-			| Cabs.SHR -> SHR
-			| Cabs.BAND -> BAND
-			| Cabs.BOR -> BOR
-      | Cabs.XOR -> XOR
-			| Cabs.LE -> raise (StError "<=")
-      | Cabs.GT -> raise (StError ">")
-      | Cabs.GE -> raise (StError ">=")
-      | Cabs.ADD_ASSIGN -> raise (StError "+=")
-      | Cabs.SUB_ASSIGN -> raise (StError "-=")
-      | Cabs.MUL_ASSIGN -> raise (StError "*=")
-      | Cabs.DIV_ASSIGN -> raise (StError "/=")
-      | Cabs.MOD_ASSIGN -> raise (StError "%=")
-      | Cabs.BAND_ASSIGN -> raise (StError "&=")
-      | Cabs.BOR_ASSIGN -> raise (StError "|=")
-      | Cabs.XOR_ASSIGN -> raise (StError "^=")
-      | Cabs.SHL_ASSIGN -> raise (StError "<<=")
-      | Cabs.SHR_ASSIGN -> raise (StError ">>=")
-      | Cabs.ASSIGN ->  raise (StError "ASSIGN")
-       *)
-                                                                                                                         
+                                                                                                 
 		let pprint = function
 			| ADD -> "+"
 			| SUB -> "-"
@@ -528,7 +278,9 @@ module Exp = struct
   let is_funcptr = function VAR (_, attrs) -> List.exists (fun x -> match x with FUNCPTR _ -> true | _ -> false) attrs | _ -> false
 
   let is_func = function VAR (_, attrs) -> List.exists (fun x -> match x with FUNC _ -> true | _ -> false) attrs | _ -> false
-                                                                                                                      
+
+  let is_vararg_func = function VAR (_, attrs) -> List.exists (fun x -> match x with FUNC (_, [ARRAY []]) -> true | _ -> false) attrs | _ -> false
+
   let is_question = function VAR (_, attrs) -> List.exists (fun x -> match x with QUESTION -> true | _ -> false) attrs | _ -> false
 
   let is_nested = function VAR (_, attrs) -> List.exists (fun x -> match x with NESTED -> true | _ -> false) attrs | _ -> false
@@ -704,7 +456,10 @@ module Exp = struct
     else
       false
 
-  
+  let rec enptr = function
+    | VAR (s, a) -> VAR (s,PTR::a)
+    | BINOP (a, o, b) -> BINOP (enptr a, o, b)
+    | e -> e
       
 	let rec toStr = function
 		  NOTHING -> "<nothing>"
@@ -2461,36 +2216,15 @@ module Term = struct
   let infer_attributes vars to_static loc = function
       NULL -> [Exp.PTR]
     | EXP exp -> Exp.infer_attributes vars to_static loc exp
-   (* | FCALL (_, _) -> [] *)
 
   let term__string (tr_exp : Exp.t -> Exp.t) = function
     | NULL -> NULL
     | EXP exp -> EXP (tr_exp exp)
-   (* | x -> x *)
 
-                     (*
-	let rec toTerm packs = function
-	 | Cabs.NOTHING -> NULL
-	 | Cabs.CONSTANT (Cabs.CONST_STRING (s)) -> EXP (Exp.STRING s)
-   | Cabs.CONSTANT (Cabs.CONST_CHAR (cl)) ->
-     begin
-       let x =
-         try
-           List.hd cl
-         with
-           _ -> raise (StError("toTerm - Cabs.CONSTANT"))
-       in
-			 if Int64.to_int x = 0 then
-			   NULL
-		   else
-		     EXP (Exp.CONST (Int64.to_int x))
-     end
-	 | Cabs.CAST ((_, Cabs.PTR _), Cabs.SINGLE_INIT (Cabs.CONSTANT (Cabs.CONST_INT "0"))) -> NULL (**)
-	 | Cabs.PAREN x -> toTerm packs x
-	 | Cabs.VARIABLE ("NULL") -> NULL
-	 | x -> EXP (Exp.toExp packs x)
-                      *)
-               
+  let enptr = function
+      NULL -> NULL
+    | EXP e -> EXP (Exp.enptr e)
+  
 	let encode x =
 	 	EXP (Exp.encode x)
 
@@ -2499,7 +2233,6 @@ module Term = struct
   let decode = function
 		| NULL -> ("nil", [])
 		| EXP (s) -> Exp.decode s
-  (* | FCALL (s,_) -> (s ^ "(..)", []) *)
 
 	let rec substitute (to_be_replaced:t) (replaced_by:t) (_t:t) : t =
     match replaced_by with

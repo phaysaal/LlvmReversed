@@ -24,10 +24,7 @@ default: $(TOOLS)
 
 $(TOOLS):
 	$(OCAMLBUILD) $(OCAMLBUILDFLAGS) $($@_OCAMLBUILDFLAGS) $($@_OCAMLBUILDFLAGS_$(TARGET)) -I $(SRC_DIR) -build-dir build/$@ $@.$(TARGET)
-  ifneq ($(test -f $(TOOLS) && echo -n yes),yes)
-	  ln -s build/$@/src/$@.$(TARGET) $@
-  endif
-
+	ln -s build/$@/src/$@.$(TARGET) $@
 
 #run: $(TOOLS) hello.bc
 #	CAML_LD_LIBRARY_PATH=/usr/lib/ocaml/llvm-$(LLVM_VERSION) ./build/tutorial02/src/tutorial02.byte hello.bc
