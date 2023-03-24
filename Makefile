@@ -2,11 +2,11 @@ SRC_DIR:=src
 
 TOOLS:=llvmrev
 
-#TARGET:=native
-TARGET:=byte
+TARGET:=native
+#TARGET:=byte
 
 LLVM_VERSION := 3.8
-CLANG := clang-$(LLVM_VERSION)
+#CLANG := clang-$(LLVM_VERSION)
 
 OCAMLBUILDFLAGS:=-classic-display -j 0 #-cflags -w,@a-4
 
@@ -24,9 +24,9 @@ default: $(TOOLS)
 
 $(TOOLS):
 	$(OCAMLBUILD) $(OCAMLBUILDFLAGS) $($@_OCAMLBUILDFLAGS) $($@_OCAMLBUILDFLAGS_$(TARGET)) -I $(SRC_DIR) -build-dir build/$@ $@.$(TARGET)
-ifneq ($(shell test -f $(TOOLS) && echo -n yes),yes)
-	ln -s build/$@/src/$@.$(TARGET) $@
-endif
+  ifneq ($(test -f $(TOOLS) && echo -n yes),yes)
+	  ln -s build/$@/src/$@.$(TARGET) $@
+  endif
 
 
 #run: $(TOOLS) hello.bc
